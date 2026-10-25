@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ordinary browser file upload test</title>
+<style>
+body { font: 16px/1.5 system-ui; margin: 32px; } #zone { border: 3px dashed #678; padding: 65px 20px; text-align: center; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; } input { width: 100%; max-width: 650px; } .pass { color: #087b35; } .fail { color: #a21b20; }
+</style>
+<h1>Photo album upload test</h1>
+<p>This page uses ordinary <code>DataTransfer.files</code>. It has no native bridge and does not fetch the dragged URL.</p>
+<label>Expected SHA-256 (optional for your Immich original)<br><input id="expected" maxlength="64" placeholder="Paste the source file SHA-256"></label>
+<p>The bundled PNG fixture is verified automatically. Large-file hashing reads the file into memory on this test page.</p>
+<div id="zone">Drop files here</div>
+<pre id="results" role="status">Waiting for files…</pre>
+<script src="drop-zone.js"></script>
+</html>

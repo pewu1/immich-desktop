@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-immich"
+description = "Enables the open_immich command without any pre-configured scope."
+commands.allow = ["open_immich"]
+
+[[permission]]
+identifier = "deny-open-immich"
+description = "Denies the open_immich command without any pre-configured scope."
+commands.deny = ["open_immich"]

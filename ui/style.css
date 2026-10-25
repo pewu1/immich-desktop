@@ -1,0 +1,7 @@
+:root { color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }
+body { margin: 0; } main { max-width: 750px; padding: 32px; margin: auto; }
+h1 { font-size: 28px; } h2 { font-size: 20px; }
+#fixture { cursor: grab; user-select: none; -webkit-user-drag: none; touch-action: none; border: 2px solid #789; border-radius: 12px; }
+button, input { font: inherit; padding: 9px; margin: 6px 0; } input { box-sizing: border-box; width: 100%; }
+button { cursor: pointer; } #status { min-height: 3em; } pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+input[type="checkbox"] { width: auto; }

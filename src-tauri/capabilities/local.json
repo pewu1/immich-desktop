@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local",
+  "description": "Only the bundled setup and drag lab can use local commands.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": ["allow-drag-test-file", "allow-get-settings", "allow-save-settings", "allow-open-immich"]
+}

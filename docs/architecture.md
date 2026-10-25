@@ -1,0 +1,47 @@
+# Architecture and security
+
+The local Tauri window configures the server and API key. A separate webview loads Immich directly with `ui/immich.js` injected at document start. Existing `data-asset` UUID attributes identify thumbnails. No proxy, frontend fork, image-URL guessing or cookie copying is used.
+
+## Single-gesture flow
+
+Hover/focus and pointer-down prepare filename metadata only. A plain mouse movement beyond eight CSS pixels captures the loaded thumbnail into a PNG canvas, scaled to at most 192 pixels. At that threshold JavaScript invokes `drag_asset` once, including the asset UUID, PNG preview and a private IPC status channel. Rust validates the UUID, preview encoding/dimensions and window origin. It completes any cold metadata lookup, checks the actual OS mouse-button state on the UI thread, starts the original download and begins native deferred dragging. A released mouse never causes a late native session.
+
+The destination receives the original's filename and contents. The PNG is only the drag image; it is never substituted for the original upload. If the original is ready, delivery is immediate. Otherwise the receiver obtains it once the download finishes. Status messages cover readiness, cancellation and failures. Synthetic HTML file drops and remote download URLs are not used.
+
+## Native adapter and lifetime
+
+`src-tauri/native/drag_macos.m` uses `NSFilePromiseProvider`, native `NSDraggingItem` previews and a background operation queue. The promise delegate waits for a completed disk file, copies it to the receiver-provided destination without overwriting an existing file, then invokes the completion handler. The provider strongly owns its otherwise weak delegate. The Rust lease is released once the session ends and outstanding writes finish; a cancelled session releases its lease without waiting for a receiver.
+
+AppKit writes the genuine provider directly; its metadata is not cloned into a generic item. The browser data provider is attached to AppKit's existing item afterward. There is no plain-text filename flavor: an empty HTML representation enables Chromium drag entry without offering Finder a text clipping. Browser bytes are rendered only when the pointer targets a Chromium window, identified from window bounds/PID and application bundle ID; no window titles or screenshots are collected. Native file-promise receivers retain their background-copy path. Preparing browser content while hovering must not fulfill a later Finder drop: the transfer remains leased until that destination's file write completes.
+
+Chrome's macOS implementation does not fulfill this modern promise. It reads promised-content UTI bytes synchronously on drag entry, with a 256 MiB cap. The adapter therefore also publishes that representation and Chromium's filename metadata. A worker waits for the complete disk original and maps it read-only with `mmap`; no full-original heap buffer or RAM cache is created in the app. The mapping retains a transfer lease until AppKit releases it. Chrome and the OS pasteboard independently copy the bytes; those external allocations are outside this app's control. The source services its run loop while responding, but Chrome may pause on drag entry until preparation finishes. A 30-second compatibility timeout returns an error and leaves the latest disk download available for retry. Files above Chrome's cap cannot use this macOS deferred-content path; regular file-promise receivers are not subject to that browser-specific limit.
+
+`src-tauri/native/drag_windows.cpp` implements a Unicode file descriptor and `FILECONTENTS` through `IDataObject`, `IDataObjectAsyncCapability` and disk-backed `IStream`s. Free-threaded marshaling allows data extraction on receiver workers. `Read`, `Stat` and end-relative `Seek` refuse to block the Tauri UI STA. Stream clones retain the transfer independently. Native drag images use validated small RGBA buffers. Original-file reads use bounded buffers, never an in-memory whole-file stream. Windows compilation and Chrome interoperability need a Windows SDK/host; see validation status.
+
+The C ABI in `drag.h` owns one Rust `Arc<Transfer>` reference and uses explicit retain/release callbacks. Rust catches panics inside callbacks; ordinary failures become native transfer errors and safe status messages. Native callbacks take paths only from the OS promise receiver, never from remote JavaScript. The last application-window close is deferred while a native transfer holds a lease, allowing an accepted drop to finish before process exit.
+
+Cached originals use the same managed providers rather than exposing raw cache paths whose later use could not be tracked. macOS promises create receiver-owned copies; Chrome's compatibility representation is file-backed until copied to its pasteboard/renderer data. Windows stream references keep the source leased until released. The drag pasteboard is cleared after successful handoff or cancellation, guarded against clearing a newer drag. Ending a mouse drag alone is not proof that a receiver has finished reading.
+
+## One-file disk cache
+
+The application holds an exclusive process lock before opening its cache. One current manifest identifies the latest dragged asset, partitioned logically by origin/API-key hash. Switching server credentials cannot reuse another profile's original. At most one original is available for retries across the app, including the test lab.
+
+Every new generation has a random UUID directory. Payloads are streamed to `original.partial`, flushed, then renamed to `file/<original filename>`. Only completed files become readable to native providers. The current manifest is written and atomically renamed separately. Metadata is capped at 1 MiB, PNG previews at 256 x 256 and 400,000 encoded characters, and originals at 20 GiB. TLS and authentication errors are sanitized. No full-original bytes are stored in shared state; it holds only paths, metadata, status and synchronization primitives.
+
+Selecting another asset invalidates the previous retry entry immediately. The evicted generation is deleted when its final download/provider/stream reference is dropped. Active transfers may therefore temporarily coexist with the latest original. Superseded downloads are cancelled once no native reader needs them; cancelling the latest gesture may leave its download running for a retry. Repeated requests for the current original share one download. Distinct generations prevent late A -> B -> A completions from overwriting the newest file or manifest.
+
+On restart, the last valid completed manifest is restored; orphaned generations, partial downloads and legacy per-profile cache directories are removed. Cleanup is limited to the application's own cache. If the OS prevents deletion, the noncurrent generation cannot be reused and cleanup is retried at next startup. Receiver-owned copies are outside the app's cache. Retention is not secure erasure, and revoking a key cannot revoke an already downloaded original.
+
+## Authentication, TLS and IPC
+
+Web login uses the persistent native webview profile. Native downloads use a separate key with `asset.read` and `asset.download`, stored in Keychain / Windows Credential Manager. The settings JSON contains only the server origin. Rust does not read webview cookies or web storage, return API keys to the frontend, or include credentials with transferred files.
+
+All commands participate in Tauri's `AppManifest` ACL. The local window has only fixture/configuration commands. The exact configured remote scheme/host/port and `immich` webview receive only `prepare_asset` (metadata) and `drag_asset` (managed original transfer). Status uses the command's own IPC channel, not general event permissions. No arbitrary paths, URLs, generic HTTP, filesystem or shell operations are exposed.
+
+Both Rust and the injected script check origin; JavaScript additionally rejects subframes. HTTPS OAuth pages may load but inherit no native privileges. Origin is rechecked before native drag begins. Origins reject userinfo, subpaths, queries/fragments and pattern metacharacters. Asset IDs and filenames are validated against traversal and platform-specific device names. PNG previews are decoded with dimension and memory limits before native code sees them.
+
+reqwest uses OS TLS trust with redirects disabled, a 15-second connection timeout and a 30-minute request timeout. Trust development CAs in the OS; there is no validation bypass. The configured origin remains trusted: same-origin scripts can invoke the narrowly scoped commands for accessible assets. JavaScript `isTrusted` checks govern normal gesture behavior, not authorization.
+
+## Limits
+
+One thumbnail per gesture. Full-screen viewer dragging, multi-selection, percentage progress, popup/custom-scheme OAuth and subpath servers are not implemented. Canvas preview capture requires a loaded, origin-readable thumbnail; a tainted/unavailable image reports an error instead of silently using a placeholder. `data-asset` is upstream DOM, not a versioned API contract. Real deferred drops must be validated on each destination/platform combination.
