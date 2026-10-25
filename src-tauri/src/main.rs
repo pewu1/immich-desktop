@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cache;
+mod desktop;
 mod immich;
 mod native_drag;
 mod policy;
@@ -15,7 +16,7 @@ async fn drag_test_file(
     delay_ms: u64,
     fresh: bool,
 ) -> Result<(), String> {
-    if window.label() != "main" {
+    if window.label() != "lab" {
         return Err("Only the local drag lab can drag the fixture".into());
     }
     let cache = state.cache.clone();
@@ -24,7 +25,13 @@ async fn drag_test_file(
     let main_thread = window.clone();
     window
         .run_on_main_thread(move || {
-            let result = if native_drag::mouse_down() {
+            let result = if !main_thread
+                .app_handle()
+                .state::<immich::DesktopState>()
+                .resetting
+                .load(std::sync::atomic::Ordering::Acquire)
+                && native_drag::mouse_down()
+            {
                 cache
                     .fixture(on_event, delay_ms.min(30_000), fresh)
                     .and_then(|transfer| native_drag::start(main_thread, transfer, preview))
@@ -39,6 +46,13 @@ async fn drag_test_file(
 
 fn main() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if window.label() == "immich"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            {
+                window.app_handle().exit(0);
+            }
+        })
         .setup(|app| {
             let root = app.path().app_cache_dir()?;
             std::fs::create_dir_all(&root)?;
@@ -60,7 +74,10 @@ fn main() {
                 profile: std::sync::Mutex::new(None),
                 _cache_lock: lock,
                 cache: cache::Cache::new(root.join("originals"))?,
+                resetting: std::sync::atomic::AtomicBool::new(false),
             });
+            desktop::install_menu(app)?;
+            desktop::startup(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -69,7 +86,8 @@ fn main() {
             immich::save_settings,
             immich::open_immich,
             immich::prepare_asset,
-            immich::drag_asset
+            immich::drag_asset,
+            desktop::reset_configuration
         ])
         .build(tauri::generate_context!())
         .expect("Unable to run Immich Desktop")

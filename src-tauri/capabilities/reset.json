@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local-reset",
+  "description": "Only the bundled reset confirmation can erase local settings and login data.",
+  "local": true,
+  "windows": ["reset"],
+  "permissions": ["allow-reset-configuration"]
+}

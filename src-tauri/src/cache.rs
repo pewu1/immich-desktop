@@ -15,6 +15,9 @@ use tauri::{ipc::Channel, Url};
 use tokio::io::AsyncWriteExt;
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static EXIT_WHEN_DONE: Mutex<Option<tauri::AppHandle>> = Mutex::new(None);
+pub fn has_active_transfers() -> bool {
+    ACTIVE.load(Ordering::Acquire) != 0
+}
 pub fn defer_exit(app: tauri::AppHandle) -> bool {
     let mut pending = EXIT_WHEN_DONE.lock().unwrap();
     if ACTIVE.load(Ordering::Acquire) == 0 {
@@ -174,6 +177,19 @@ pub struct Cache {
     current: Mutex<Option<Arc<Job>>>,
 }
 impl Cache {
+    pub fn clear(&self) -> Result<(), String> {
+        let mut current = self.current.lock().map_err(|_| "Cache state unavailable")?;
+        match std::fs::remove_file(self.root.join("current.json")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_error(e)),
+        }
+        if let Some(old) = current.take() {
+            old.keep.store(false, Ordering::Release);
+            old.changed.notify_waiters();
+        }
+        Ok(())
+    }
     pub fn new(root: PathBuf) -> Result<Arc<Self>, String> {
         std::fs::create_dir_all(&root).map_err(io_error)?;
         #[cfg(unix)]

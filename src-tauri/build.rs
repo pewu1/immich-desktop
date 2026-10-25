@@ -4,6 +4,7 @@ fn main() {
         Ok("macos") => {
             cc::Build::new()
                 .file("native/drag_macos.m")
+                .file("native/session_macos.m")
                 .flag("-fobjc-arc")
                 .flag("-fblocks")
                 .flag("-mmacosx-version-min=11.0")
@@ -32,6 +33,7 @@ fn main() {
             "open_immich",
             "prepare_asset",
             "drag_asset",
+            "reset_configuration",
         ]),
     ))
     .expect("Tauri build failed")

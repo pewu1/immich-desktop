@@ -19,6 +19,23 @@ fn complete(cache: &Cache, transfer: &Transfer, bytes: &[u8]) -> PathBuf {
     path
 }
 #[test]
+fn reset_evicts_retry_file_without_deleting_an_active_receivers_original() {
+    let temp = tempfile::tempdir().unwrap();
+    let cache = Cache::new(temp.path().into()).unwrap();
+    let transfer = select(&cache, A);
+    let path = complete(&cache, &transfer, b"original");
+    cache.clear().unwrap();
+    assert!(cache.cached_metadata(A).is_none());
+    assert!(!temp.path().join("current.json").exists());
+    assert!(path.is_file());
+    drop(transfer);
+    assert!(!path.exists());
+    assert!(Cache::new(temp.path().into())
+        .unwrap()
+        .cached_metadata(A)
+        .is_none());
+}
+#[test]
 fn only_last_asset_is_reusable_and_readers_delay_deletion() {
     let temp = tempfile::tempdir().unwrap();
     let cache = Cache::new(temp.path().into()).unwrap();

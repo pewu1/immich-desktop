@@ -8,16 +8,19 @@
 | Modern `NSFilePromiseProvider`-only deferred drop | **Failed**: user reported Chrome rejected it or no file appeared |
 | Chrome promised-content compatibility adapter | User reported a real Immich JPEG received through `DataTransfer.files` with filename, JPEG MIME and 2,730,861-byte size; source hash comparison not supplied |
 | Five-second synthetic Chrome drop | Failed / stalled in user testing; it exceeds the observed synchronous browser-request tolerance |
-| Finder desktop / Firefox with generic-item text fallback | Failed in user testing: a text file / only `text/plain`. Revised code writes a genuine AppKit provider, removes the text flavor and attaches compatibility bytes afterward; physical retest pending |
+| Earlier generic-item text fallback | Failed in user testing: Finder created a text file and Firefox received only `text/plain` |
+| Current native provider: Finder / Chrome | User confirmed copying to Finder and dragging into Chrome work after the provider fix; no new fixture hash results supplied |
+| Current native provider: Firefox on macOS | **Failed** in the user's retest; currently unsupported |
 | macOS Rust + Objective-C build | `cargo check` passed; debug app bundle built |
-| Rust policy/cache/preview tests | 12 passed, including real loopback HTTP failure tests |
-| JavaScript gesture/fixture tests | 8 passed |
+| Rust policy/cache/preview tests | 13 passed, including reset eviction with an active reader and real loopback HTTP failure tests |
+| JavaScript gesture/fixture/setup tests | 11 passed, including no drag-status toast, save/connect and failed reset retry |
 | Off-screen native formats and delegate test | Browser payload/metadata, no text fallback, no non-Chromium rendering, original-file delegate write and reference cleanup checked |
+| Native macOS login-clear callback | Passed against an isolated nonpersistent WebKit store: session cookie present before reset and absent after completion; no user profile touched |
 | Windows native C++ adapter | Implemented; **not compiled or tested here**, no Windows SDK/host |
 | Apple Silicon build/drop | Not tested; Intel macOS host only |
 | Live Immich replacement flow | Not tested against a supplied server/account |
 
-The user's real-photo Chrome result establishes that the compatibility path can deliver an ordinary JPEG `File`; it does not establish a source-hash match or arbitrary download latency. The five-second synthetic test and the earlier text-fallback desktop/Firefox results are failures. The revised AppKit provider needs a physical desktop/Firefox retest.
+The user's real-photo Chrome result establishes that the compatibility path can deliver an ordinary JPEG `File`; it does not establish a source-hash match or arbitrary download latency. The latest physical retest confirms the revised AppKit provider works with Finder and Chrome. Firefox still fails. The five-second synthetic test and the earlier text-fallback results remain failures.
 
 The command-line `--receiver` probe did not complete even with Apple's unmodified provider (`--baseline`). Consequently the default native check tests promise recognition plus the actual writing delegate, not a completed cross-process `NSFilePromiseReceiver` transaction. Use the physical Finder test for that boundary.
 
@@ -25,7 +28,7 @@ This environment has no browser-control tool and macOS denied automated pointer-
 
 ## Native acceptance
 
-1. Close previous app builds and launch the new bundle. Serve the receiver as described in README and open it in a separate Chrome window.
+1. Close previous app builds and launch a debug bundle. Open **Development → Native drag lab**. Serve the receiver as described in README and open it in a separate Chrome window.
 2. Leave **Force a fresh original** checked and use **Normal — no artificial delay**. One gesture must produce one item in `DataTransfer.files`, named `drag-test.png`, MIME `image/png`, 39,564 bytes, with both match checks true. Repeat with the one-second mode. The five-second mode reproduces the known browser-timeout boundary and must not be counted as supported early-drop delivery.
 3. Uncheck the fresh option and drag again. It must reuse the latest original from disk immediately. Repeat with Escape cancellation and retry. Drop the fixture onto the desktop: it must be a real PNG with the same bytes, never a text/HTML clipping. Repeat into Firefox and inspect `DataTransfer.files`.
 4. Check the displayed thumbnail follows the pointer. Test fast/slow movement and release before preparation finishes; no late native drag may begin after release.
@@ -35,7 +38,7 @@ Chrome on macOS requests promised-content bytes synchronously on drag entry, so 
 
 ## Immich and cache acceptance
 
-1. Configure the origin and API key; log in and browse timeline, albums, search and viewer/video screens. Restart to verify session persistence.
+1. Configure the origin and API key; **Save and connect** must open Immich and hide setup. Log in and browse timeline, albums, search and viewer/video screens. Restart: only Immich should appear, with the session retained subject to server expiration/revocation. Verify configuration contains no drag-test controls and real-photo dragging adds no status toast.
 2. Drag an uncached JPEG with a known source hash once and drop before download finishes. Verify exact filename/size/hash. Repeat from cache. Repeat for PNG, HEIC, Unicode filenames, a large original within the browser limit and a small video.
 3. Drag A, then B: A must immediately stop being reusable. Its generation disappears from disk once the last active reader/mapping finishes. Retrying B must reuse its download or completed file. A -> B -> A must not resurrect an obsolete generation.
 4. Start a slow transfer, switch assets, close its source window and let the receiver finish. Transfer leases must prevent premature deletion. Closing the last app window must defer process exit only while an accepted native transfer remains active.
@@ -43,6 +46,8 @@ Chrome on macOS requests promised-content bytes synchronously on drag entry, so 
 6. Restart after a completed drag and after an interrupted download. Only the latest valid original is restored, and orphaned/legacy cache generations are removed. OS deletion failures are retried on startup.
 7. Inspect app memory during large downloads. There must be no whole-original heap buffer or RAM cache; macOS Chrome delivery may have temporary file-backed mapped pages and external browser/pasteboard copies.
 8. Verify ordinary clicks, buttons, selection modifiers, context menus, scrolling, navigation, zoom, touch, video controls and uploads into Immich remain functional.
+9. Open About from the native menu: verify the icon, GPL license (including bundled full text), GitHub link and external-browser launch. Check the app icon in the macOS Dock and Windows taskbar/window.
+10. Choose **Reset configuration and login…** and confirm. It must refuse active transfers, otherwise remove local settings/key/cache and await browser-data deletion, restart to setup, and require login after reconnecting. Check IndexedDB/local storage/cookies as well as the visible login screen. Repeat after interrupting reset: startup must offer reset rather than the old session. Test WebView2 deletion errors and unavailable Keychain credentials. These live lifecycle checks remain pending on both target platforms; compilation and cache tests do not prove browser-session deletion.
 
 ## Security and outstanding checks
 

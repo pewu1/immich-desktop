@@ -24,24 +24,3 @@ image.addEventListener('dragstart', event => event.preventDefault());
 fetch('fixture.json').then(r => r.json()).then(data => {
   document.querySelector('#expected').textContent = JSON.stringify(data, null, 2);
 });
-
-const setupStatus = document.querySelector('#setup-status');
-const server = document.querySelector('#server');
-const apiKey = document.querySelector('#api-key');
-window.__TAURI__.core.invoke('get_settings').then(settings => { server.value = settings.server; }).catch(error => { setupStatus.textContent = String(error); });
-document.querySelector('#setup').addEventListener('submit', async event => {
-  event.preventDefault();
-  setupStatus.textContent = 'Saving to the OS credential store…';
-  try {
-    await window.__TAURI__.core.invoke('save_settings', { server: server.value, apiKey: apiKey.value });
-    apiKey.value = '';
-    setupStatus.textContent = 'Saved. Open Immich to log in and browse. Restart before changing configuration after opening Immich.';
-  } catch (error) { setupStatus.textContent = String(error); }
-});
-document.querySelector('#open-immich').addEventListener('click', async () => {
-  setupStatus.textContent = 'Opening Immich…';
-  try {
-    await window.__TAURI__.core.invoke('open_immich');
-    setupStatus.textContent = 'Immich opened. Drag a photo thumbnail; its original downloads during the same gesture.';
-  } catch (error) { setupStatus.textContent = String(error); }
-});

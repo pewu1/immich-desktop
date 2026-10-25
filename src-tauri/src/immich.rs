@@ -19,6 +19,7 @@ pub struct DesktopState {
     // Lock held for process lifetime. Two instances must never clean/use the same cache.
     pub _cache_lock: std::fs::File,
     pub cache: Arc<Cache>,
+    pub resetting: std::sync::atomic::AtomicBool,
 }
 
 pub struct Profile {
@@ -32,10 +33,10 @@ pub struct Profile {
 
 #[derive(Serialize, Deserialize, Default)]
 pub struct Settings {
-    server: String,
+    pub server: String,
 }
 
-fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .app_config_dir()
@@ -43,7 +44,7 @@ fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("settings.json"))
 }
 
-fn credential(server: &Url) -> Result<keyring::Entry, String> {
+pub fn credential(server: &Url) -> Result<keyring::Entry, String> {
     let account = format!("{:x}", Sha256::digest(server.as_str().as_bytes()));
     keyring::Entry::new("app.immichdesktop.wrapper", &account)
         .map_err(|_| "OS credential store unavailable".into())
@@ -59,6 +60,10 @@ fn local(window: &WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 pub fn get_settings(window: WebviewWindow, app: AppHandle) -> Result<Settings, String> {
     local(&window)?;
+    read_settings(&app)
+}
+
+pub fn read_settings(app: &AppHandle) -> Result<Settings, String> {
     match std::fs::read(config_path(&app)?) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "Invalid settings file".into()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Settings::default()),
@@ -75,6 +80,11 @@ pub fn save_settings(
     api_key: String,
 ) -> Result<(), String> {
     local(&window)?;
+    if state.resetting.load(std::sync::atomic::Ordering::Acquire)
+        || crate::desktop::reset_pending(&app)
+    {
+        return Err("Finish resetting configuration before saving settings".into());
+    }
     let active = state.profile.lock().map_err(|_| "Profile unavailable")?;
     if active.is_some() {
         return Err("Restart the app before changing the server or API key".into());
@@ -114,6 +124,15 @@ pub async fn open_immich(
     state: State<'_, DesktopState>,
 ) -> Result<(), String> {
     local(&window)?;
+    open_configured(app, &state).await
+}
+
+pub async fn open_configured(app: AppHandle, state: &DesktopState) -> Result<(), String> {
+    if state.resetting.load(std::sync::atomic::Ordering::Acquire)
+        || crate::desktop::reset_pending(&app)
+    {
+        return Err("Finish resetting configuration before opening Immich".into());
+    }
     if let Some(existing) = app.get_webview_window("immich") {
         return existing
             .set_focus()
@@ -124,7 +143,7 @@ pub async fn open_immich(
         if let Some(profile) = active.as_ref() {
             profile.clone()
         } else {
-            let settings = get_settings(window, app.clone())?;
+            let settings = read_settings(&app)?;
             let server = policy::server_url(&settings.server)?;
             let key = credential(&server)?
                 .get_password()
@@ -168,31 +187,27 @@ pub async fn open_immich(
         include_str!("../../ui/immich.js")
     );
     let allowed_origin = profile.server.origin();
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let creator = app.clone();
-    app.run_on_main_thread(move || {
-        let result = WebviewWindowBuilder::new(
-            &creator,
-            "immich",
-            WebviewUrl::External(profile.server.clone()),
-        )
+    // Build from this async command/startup worker. Creating a WebView2 window
+    // synchronously inside a main-thread event handler can deadlock on Windows.
+    WebviewWindowBuilder::new(&app, "immich", WebviewUrl::External(profile.server.clone()))
         .title("Immich Desktop")
         .inner_size(1200.0, 850.0)
         .disable_drag_drop_handler()
         .initialization_script(script)
         // HTTPS identity-provider redirects may load, but receive no native capability.
-        // External HTTP, file:, data: and custom-scheme top-level navigation are refused.
         .on_navigation(move |url| url.origin() == allowed_origin || url.scheme() == "https")
         .build()
-        .map(|_| ())
-        .map_err(|_| "Cannot open Immich webview".to_string());
-        let _ = tx.send(result);
-    })
-    .map_err(|_| "Cannot schedule Immich window")?;
-    rx.await.map_err(|_| "Immich window interrupted")?
+        .map_err(|_| "Cannot open Immich webview")?;
+    if let Some(setup) = app.get_webview_window("main") {
+        setup.hide().map_err(|_| "Cannot hide setup")?;
+    }
+    Ok(())
 }
 
 fn remote(window: &WebviewWindow, state: &DesktopState) -> Result<Arc<Profile>, String> {
+    if state.resetting.load(std::sync::atomic::Ordering::Acquire) {
+        return Err("Configuration reset in progress".into());
+    }
     let profile = state
         .profile
         .lock()
@@ -253,9 +268,14 @@ pub async fn drag_asset(
     window
         .run_on_main_thread(move || {
             // Check again when the OS drag actually starts, after scheduling.
-            let permitted = main_thread
-                .url()
-                .is_ok_and(|url| url.origin() == profile.server.origin());
+            let permitted = !main_thread
+                .app_handle()
+                .state::<DesktopState>()
+                .resetting
+                .load(std::sync::atomic::Ordering::Acquire)
+                && main_thread
+                    .url()
+                    .is_ok_and(|url| url.origin() == profile.server.origin());
             let result = if permitted && native_drag::mouse_down() {
                 profile
                     .cache

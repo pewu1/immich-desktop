@@ -61,23 +61,22 @@ test('release before threshold prevents any delayed drag', async () => {
   await h.listeners.get('pointermove')(h.event(undefined, { clientX: 20 }));
   assert.deepEqual(h.calls.map(c => c.command), ['prepare_asset']);
 });
-test('native delivery errors are displayed, and stale events cannot overwrite a later drag', async () => {
+test('native status events add no toast or text to Immich', async () => {
   const h = harness();
   h.listeners.get('pointerdown')(h.event());
   await h.listeners.get('pointermove')(h.event(undefined, { clientX: 20 }));
   const old = h.calls.find(c => c.command === 'drag_asset').args.onEvent;
   old.onmessage({ stage: 'error', message: 'Disk full' });
-  assert.equal(h.messages.at(-1), 'Disk full');
   h.listeners.get('pointerdown')(h.event());
   await h.listeners.get('pointermove')(h.event(undefined, { clientX: 20 }));
   old.onmessage({ stage: 'ready', message: 'Old download' });
-  assert.notEqual(h.messages.at(-1), 'Old download');
+  assert.deepEqual(h.messages, []);
 });
 test('unloaded thumbnails produce an error instead of a generic preview or original request', async () => {
   const h = harness(); const image = new h.Element(); image.loaded = false;
   h.listeners.get('pointerdown')(h.event(image));
   await h.listeners.get('pointermove')(h.event(image, { clientX: 20 }));
-  assert.ok(h.messages.at(-1).includes('thumbnail to load'));
+  assert.deepEqual(h.messages, []);
   assert.equal(h.calls.filter(c => c.command === 'drag_asset').length, 0);
 });
 test('modifiers, selection controls, synthetic events and short movements preserve browsing', async () => {

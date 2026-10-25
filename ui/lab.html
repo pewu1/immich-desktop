@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Native drag lab</title><link rel="stylesheet" href="style.css"><script src="lab.js" defer></script></head>
+<body><main><h1>Native drag lab</h1>
+  <h2>Native file drag lab</h2>
+  <p>Open the destination test page in a separate Chrome window. Hold the image below and drag it into the upload zone.</p>
+  <img id="fixture" src="drag-test.png" width="160" height="120" alt="Drag this test image into Chrome" draggable="false">
+  <label><input id="fresh" type="checkbox" checked> Force a fresh original (uncheck to test retry caching)</label>
+  <label>Test delay <select id="lab-delay"><option value="0">Normal — no artificial delay</option><option value="1000">1 second — short deferred transfer</option><option value="5000">5 seconds — browser timeout stress test</option></select></label>
+  <p id="status" role="status">Ready. The 5-second mode is a stress test and may exceed browser pasteboard timeouts.</p>
+  <p>This starts an OS file drag. Check the receiver's filename, MIME type, size and SHA-256 to verify the result.</p>
+  <p>Source: <code>drag-test.png</code> · <code>image/png</code></p>
+  <pre id="expected"></pre>
+</main></body></html>

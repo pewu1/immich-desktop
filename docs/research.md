@@ -42,3 +42,12 @@ The first `NSFilePromiseProvider`-only implementation was rejected in the user's
 - [Chromium filename metadata](https://github.com/chromium/chromium/blob/main/ui/base/clipboard/clipboard_constants_mac.mm)
 - [Apple file-promise example](https://developer.apple.com/documentation/appkit/supporting-drag-and-drop-through-file-promises)
 - [Windows asynchronous data-object interface](https://learn.microsoft.com/en-us/windows/win32/api/shldisp/nn-shldisp-idataobjectasynccapability)
+
+## Firefox on macOS
+
+The user confirmed Finder and Chrome work with the revised native provider, while Firefox still fails. Firefox's macOS `IsDataFlavorSupported` checks the file flavor against `public.file-url`. `GetDataFromPasteboardItem` obtains that URL's path and creates an `nsIFile`; this import path does not fulfill the modern file promise or consume Chromium's promised-content representation. This source-level difference explains why working Finder and Chrome drops do not establish Firefox support.
+
+The current build does not advertise a raw cache file URL. Doing so would require the original to be complete before Firefox uses it and a retention policy covering reads after the drag ends. Deleting that path on the next asset drag could invalidate Firefox's file object. Firefox support remains an implementation limitation, not a passing test.
+
+- [Firefox macOS drag flavor support](https://github.com/mozilla-firefox/firefox/blob/main/widget/cocoa/nsDragService.mm)
+- [Firefox macOS file import](https://github.com/mozilla-firefox/firefox/blob/main/widget/cocoa/nsCocoaUtils.mm)

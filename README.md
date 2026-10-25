@@ -2,7 +2,7 @@
 
 A small Rust / Tauri 2 wrapper for the existing Immich web UI, with native outbound file dragging. The server URL is configured in the local setup window. The app does not replace or proxy Immich's frontend.
 
-**Status: experimental.** An earlier compatibility build successfully delivered a real Immich JPEG to Chrome on Intel macOS through `DataTransfer.files`, with its filename, JPEG MIME type and file size. Slow uncached transfers can stall or time out in Chrome. Finder/Firefox exposed a text-fallback bug; the revised native-provider fix has automated checks but needs a fresh physical test in Finder, Firefox and Chrome. Windows and Apple Silicon have not been validated. See [validation status](docs/validation.md).
+**Status: experimental.** User testing confirms that the current build copies photos to Finder and delivers files to Chrome on Intel macOS. An earlier Chrome result also recorded a real Immich JPEG through `DataTransfer.files`, with its filename, JPEG MIME type and file size; no source-hash comparison was supplied. Slow uncached transfers can stall or time out in Chrome. **Firefox drops do not work in the current macOS build.** Windows and Apple Silicon have not been validated. See [validation status](docs/validation.md).
 
 ## Compile and run on macOS
 
@@ -132,6 +132,8 @@ Tauri serves the plain files in `ui/`; there is no separate frontend build serve
 
 ## First: native drag lab
 
+Run a development build (`npm run dev` or a debug bundle), then choose **Development → Native drag lab** from the application menu. The configuration window contains only connection settings; release builds do not show the development menu.
+
 In another terminal, from this repository:
 
 ```sh
@@ -140,7 +142,7 @@ npm run test:drop-zone
 
 Open <http://127.0.0.1:4173/tests/drop-zone.html> in **Google Chrome**, beside the Tauri window. Use **Normal — no artificial delay** and drag the test image into the zone. Expect one item in `DataTransfer.files`: `drag-test.png`, `image/png`, 39,564 bytes, with `bytesMatch: true` and `fixtureMetadataMatches: true`. Uncheck **Force a fresh original** and repeat to test retry caching.
 
-The delay selector also offers a one-second deferred-transfer check and a five-second timeout stress test. The five-second case stalled/failed in the tested Chrome configuration; it is not a supported-flow demonstration. A desktop drop must create the actual PNG, never a text or HTML clipping. Firefox must likewise report a nonempty `DataTransfer.files`; those destinations require retesting after the native-provider fix.
+The delay selector also offers a one-second deferred-transfer check and a five-second timeout stress test. The five-second case stalled/failed in the tested Chrome configuration; it is not a supported-flow demonstration. A desktop drop must create the actual PNG, never a text or HTML clipping. The user confirmed Finder and Chrome work after the native-provider fix. Firefox still fails and is currently unsupported on macOS; use Chrome for the upload-zone test.
 
 The expected hash is shown in the lab and `fixtures/fixture.json`. The receiver computes SHA-256 from the received file. URL/HTML drops without files fail. Nothing is uploaded externally.
 
@@ -154,12 +156,18 @@ py -3 -m http.server 4173 --bind 127.0.0.1 --directory .
 
 1. Enter your server origin, for example `https://photos.example.com` or `https://photos.example.com:2283`. Subpaths are not supported. HTTP is allowed only for loopback development.
 2. Create an Immich API key with **asset.read** and **asset.download** permissions and enter it in local setup. It is stored in macOS Keychain / Windows Credential Manager, separately from web login. It is never returned to the remote UI. Leave the key blank to reuse one saved for that origin.
-3. Save, then open Immich and log in normally. The default persistent webview profile is used; session persistence needs a live restart test.
+3. Choose **Save and connect**, then log in normally. Subsequent launches open Immich directly without displaying setup. The app retains the persistent webview profile, including login cookies and browser storage, and reuses the API key from the OS credential store. It does not store your Immich password separately. A session can still expire or be revoked by the server; persistence needs a live restart test.
 4. Browse timeline, albums or search and drag a loaded photo thumbnail. Its actual thumbnail supplies the native preview, and Rust prepares the original in the background. Hover prepares only filename metadata. A cold metadata lookup may briefly delay the start while the mouse remains held; the app never starts a late native session after release. Supported drops need no Save As dialog or manual file selection. The old deliberate “download, then drag again” workflow has been removed; slow-transfer failures remain a limitation.
 
 Chrome on macOS uses a synchronous promised-content compatibility path: it may pause on drag entry while the original downloads, and the OS/browser can give up before the app's 30-second wait limit. This path is capped at 256 MiB. Rust streams originals to disk; the native compatibility layer supplies a read-only file mapping. Chrome and the OS pasteboard make their own internal copies, outside this app's memory/cache control. Native file promises and Windows file-backed streams use different delivery mechanisms; their implementation does not establish tested interoperability.
 
-Use the same account for the API key and web login. The key may not access all shared assets visible in the session. Restart before changing configuration after opening Immich. Do not enter keys in chat or commit them to the repository.
+Use the same account for the API key and web login. The key may not access all shared assets visible in the session. Do not enter keys in chat or commit them to the repository.
+
+Use **Immich Desktop → Reset configuration and login…** in the macOS menu bar or Windows window menu to change servers or erase local login data. Confirm **Reset and restart** to remove the saved server URL, API key, all app-webview cookies/storage and the cached original. This does not delete server photos or sign you out of other browsers. Reset waits for browser-data deletion to finish before restarting into setup, and refuses to interrupt an active file transfer. If interrupted, the next launch offers reset again instead of reopening the previous session. If a saved API key becomes unavailable, setup opens so you can enter it again.
+
+**Immich Desktop → About Immich Desktop** shows the app icon, version, GPL-3.0-only license and GitHub link. External links open in your system browser. The supplied flower-monitor artwork was prepared with transparent outer edges and exported as PNG, macOS ICNS and Windows ICO; the editable master is `src-tauri/icons/app-icon-source.png`.
+
+The injected drag handler adds no status toast or overlay to Immich. The development drag lab retains its diagnostic status display.
 
 For a private development CA, trust it in the OS store used by both the webview and Rust's native TLS client. There is no TLS-validation bypass. Configure the final HTTPS origin; API redirects are refused. HTTPS OAuth pages may load but receive no native privileges. Popup/custom-scheme login flows need testing.
 
@@ -182,7 +190,7 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 ```
 
-On macOS, run `npm run test:native:macos` to check lazy browser formats, fixture bytes, filename metadata, absence of a text fallback, the original-file writing delegate and native reference cleanup. It uses a private pasteboard and does not synthesize pointer events. It also checks that hovering Chromium does not release the original before a later Finder drop. This is not a full Finder/Firefox/Chrome end-to-end test.
+On macOS, run `npm run test:native:macos` to check lazy browser formats, fixture bytes, filename metadata, absence of a text fallback, the original-file writing delegate and native reference cleanup. It uses a private pasteboard and does not synthesize pointer events. It also checks that hovering Chromium does not release the original before a later Finder drop, and that the production login-clear callback follows deletion of a cookie in an isolated temporary WebKit store. It does not clear your saved login. This is not a full Finder/Firefox/Chrome end-to-end test or a live Immich login/reset test.
 
 The optional `--receiver` and `--baseline` native probes attempt a real `NSFilePromiseReceiver` transaction. Neither completed in the command-line environment, including Apple's unmodified baseline provider; they are diagnostic probes, not passing acceptance tests. Actual cross-application drops still need manual verification.
 

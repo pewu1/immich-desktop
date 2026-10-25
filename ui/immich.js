@@ -2,20 +2,10 @@
 'use strict';
 if (window.top !== window || location.origin !== TRUSTED_ORIGIN) return;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-let down, toast;
+let down;
 let busy = false;
 let suppressClickUntil = 0;
-let sequence = 0;
 const pending = new Map();
-function notify(message) {
-  if (!document.body) return;
-  if (!toast) {
-    toast = document.createElement('div'); toast.setAttribute('role', 'status');
-    Object.assign(toast.style, { position: 'fixed', bottom: '24px', left: '24px', zIndex: '2147483647', maxWidth: '450px', background: '#152238', color: '#fff', padding: '12px 18px', borderRadius: '8px', font: '14px system-ui', pointerEvents: 'none' });
-    document.body.append(toast);
-  }
-  toast.textContent = message;
-}
 function identify(target) {
   if (!(target instanceof Element) || target.closest('button, input, textarea, select, [contenteditable="true"]')) return;
   const element = target.closest('[data-asset]');
@@ -63,20 +53,14 @@ window.addEventListener('pointermove', async event => {
   const photo = down; down = undefined;
   event.preventDefault(); event.stopImmediatePropagation(); suppressClickUntil = Date.now() + 600;
   busy = true;
-  const attempt = ++sequence;
-  let delivered = false;
   try {
     const core = bridge();
     const previewPng = preview(photo.element);
     const onEvent = new core.Channel();
-    onEvent.onmessage = message => {
-      if (attempt !== sequence || delivered) return;
-      delivered = message.stage === 'delivered'; notify(message.message);
-    };
-    notify('Starting photo drag…');
+    onEvent.onmessage = () => {}; // Keep status diagnostics in the standalone drag lab.
     // Do not await an original download. Rust starts a promise/stream while the button is held.
     await core.invoke('drag_asset', { assetId: photo.id, previewPng, onEvent });
-  } catch (error) { if (attempt === sequence) notify(String(error)); }
+  } catch { /* Leave Immich's interface unchanged; a failed gesture can be retried. */ }
   finally { busy = false; }
 }, { capture: true, passive: false });
 window.addEventListener('dragstart', event => { if (down || identify(event.target)) event.preventDefault(); }, true);

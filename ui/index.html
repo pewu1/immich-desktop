@@ -1,26 +1,18 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Immich Desktop</title><link rel="stylesheet" href="style.css"><script src="lab.js" defer></script></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Immich Desktop</title><link rel="stylesheet" href="style.css"><script src="setup.js" defer></script></head>
 <body><main>
+  <img class="app-icon" src="app-icon.png" width="96" height="96" alt="">
   <h1>Immich Desktop</h1>
   <section aria-labelledby="setup-title">
     <h2 id="setup-title">Connect your Immich server</h2>
     <form id="setup">
       <label>Server URL<input id="server" type="url" placeholder="https://photos.example.com" required autocomplete="url"></label>
       <label>API key (asset.read and asset.download)<input id="api-key" type="password" placeholder="Leave blank to reuse a saved key" autocomplete="off"></label>
-      <button type="submit">Save configuration</button>
+      <button type="submit">Save and connect</button>
       <button id="open-immich" type="button">Open Immich</button>
     </form>
-    <p>The API key is stored in the OS credential store. Log in normally after opening Immich.</p>
+    <p>The API key is stored in the OS credential store. Log in normally after opening Immich. Your login session is remembered across restarts.</p>
     <p id="setup-status" role="status"></p>
   </section>
-  <h2>Native file drag lab</h2>
-  <p>Open the destination test page in a separate Chrome window. Hold the image below and drag it into the upload zone.</p>
-  <img id="fixture" src="drag-test.png" width="160" height="120" alt="Drag this test image into Chrome" draggable="false">
-  <label><input id="fresh" type="checkbox" checked> Force a fresh original (uncheck to test retry caching)</label>
-  <label>Test delay <select id="lab-delay"><option value="0">Normal — no artificial delay</option><option value="1000">1 second — short deferred transfer</option><option value="5000">5 seconds — browser timeout stress test</option></select></label>
-  <p id="status" role="status">Ready. The 5-second mode is a stress test and may exceed browser pasteboard timeouts.</p>
-  <p>This starts an OS file drag. Check the receiver's filename, MIME type, size and SHA-256 to verify the result.</p>
-  <p>Source: <code>drag-test.png</code> · <code>image/png</code></p>
-  <pre id="expected"></pre>
 </main></body></html>
