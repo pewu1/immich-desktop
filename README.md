@@ -58,14 +58,15 @@ The app targets macOS 11 or later, on Intel and Apple Silicon. Build it on a Mac
 
    Quit any other Immich Desktop instance before opening the new bundle. Only one instance may use the cache at a time.
 
-6. For an optimized release `.app`:
+6. Build the optimized release app and macOS disk image:
 
    ```sh
-   npm run build -- --bundles app
-   open "src-tauri/target/release/bundle/macos/Immich Desktop.app"
+   npm run build
    ```
 
-   To also create the configured installer bundles, run `npm run build`. Look under `src-tauri/target/release/bundle/` for the `.app` and `.dmg`. Distribution signing/notarization is not configured.
+   The `.app` is under `src-tauri/target/release/bundle/macos/`; the `.dmg` is under `src-tauri/target/release/bundle/dmg/`. The build finishes without installing or launching the app. Open the DMG yourself, drag **Immich Desktop** into **Applications**, eject the disk image, then launch the installed app. Quit any existing instance before replacing it. Distribution signing/notarization is not configured.
+
+   For an app-only build, use `npm run build -- --bundles app`. Debug and explicit architecture options remain available; omit `--bundles app` to produce the DMG for those builds too.
 
 By default, the app builds for the Mac running the command. To select an architecture or create a universal app, install both Rust targets:
 
@@ -157,9 +158,12 @@ py -3 -m http.server 4173 --bind 127.0.0.1 --directory .
 1. Enter your server origin, for example `https://photos.example.com` or `https://photos.example.com:2283`. Subpaths are not supported. HTTP is allowed only for loopback development.
 2. Create an Immich API key with **asset.read** and **asset.download** permissions and enter it in local setup. It is stored in macOS Keychain / Windows Credential Manager, separately from web login. It is never returned to the remote UI. Leave the key blank to reuse one saved for that origin.
 3. Choose **Save and connect**, then log in normally. Subsequent launches open Immich directly without displaying setup. The app retains the persistent webview profile, including login cookies and browser storage, and reuses the API key from the OS credential store. It does not store your Immich password separately. A session can still expire or be revoked by the server; persistence needs a live restart test.
-4. Browse timeline, albums or search and drag a loaded photo thumbnail. Its actual thumbnail supplies the native preview, and Rust prepares the original in the background. Hover prepares only filename metadata. A cold metadata lookup may briefly delay the start while the mouse remains held; the app never starts a late native session after release. Supported drops need no Save As dialog or manual file selection. The old deliberate “download, then drag again” workflow has been removed; slow-transfer failures remain a limitation.
+4. Drag a loaded photo or video thumbnail, or the media surface of an opened photo/video. Zoomed photos retain mouse panning; video controls remain usable. A single item's preview supplies the native drag image while Rust prepares the original in the background. Hover prepares only filename metadata and, when needed, a video poster. Release or Escape cancels preparation; it must not start a late native session.
+5. Check several photos/videos in the timeline or an album, then drag a checked thumbnail to export the complete selection, including offscreen items. Keep the mouse held while the originals prepare; group dragging starts when every file is ready. Dragging an unchecked item exports only that item. Dragging never changes the checkboxes, including long holds, cancellation and errors. Duplicate filenames within a group receive numbered suffixes.
 
-Chrome on macOS uses a synchronous promised-content compatibility path: it may pause on drag entry while the original downloads, and the OS/browser can give up before the app's 30-second wait limit. This path is capped at 256 MiB. Rust streams originals to disk; the native compatibility layer supplies a read-only file mapping. Chrome and the OS pasteboard make their own internal copies, outside this app's memory/cache control. Native file promises and Windows file-backed streams use different delivery mechanisms; their implementation does not establish tested interoperability.
+Full-selection integration reads Immich's existing selection manager from the deployed web modules. If an Immich version does not expose a compatible manager, checked-item dragging is skipped rather than exporting an incomplete selection. Single unchecked items and the viewer do not require that adapter. Groups are limited to 10,000 items per gesture.
+
+Single-item Chrome drops on macOS use a synchronous promised-content compatibility path: they may pause on drag entry while the original downloads, and the OS/browser can give up before the app's 30-second wait limit. This path is capped at 256 MiB. Rust streams originals to disk; the native compatibility layer supplies a read-only file mapping. Groups use completed, retained files with one native file URL per item on macOS and a `CF_HDROP` file list on Windows. Groups do not use the single-item browser-content representation. Cross-application delivery still needs physical platform testing.
 
 Use the same account for the API key and web login. The key may not access all shared assets visible in the session. Do not enter keys in chat or commit them to the repository.
 
@@ -198,6 +202,6 @@ The optional `--receiver` and `--baseline` native probes attempt a real `NSFileP
 - [Feasibility and primary sources](docs/research.md)
 - [Manual acceptance procedure and limitations](docs/validation.md)
 
-Single-thumbnail drags are implemented. HEIC/videos follow the same original-byte path, but browser MIME recognition and destination acceptance need testing. Multi-select, viewer-image dragging, percentage progress, bulk prefetch and Linux are not implemented. Thumbnail detection requires Immich's `data-asset` attribute.
+Thumbnail, viewer and multiple-selection dragging are implemented. HEIC/videos follow the original-byte path, but browser MIME recognition and destination acceptance need testing. Percentage progress, bulk prefetch and Linux are not implemented. Thumbnail detection requires Immich's `data-asset` attribute; full-selection dragging additionally depends on a compatible upstream selection manager.
 
-Originals stream to disk; complete originals are never retained in RAM. Only the latest dragged original is kept for retries. Dragging a different asset immediately evicts the previous retry entry, then deletes its disk files once any active receiver finishes reading. There may temporarily be additional files for active outgoing transfers. Old multi-entry caches and abandoned staging files are removed on startup. Receiver-owned copies created by Chrome are outside this app's cache.
+Originals stream to disk; complete originals are never retained in RAM. The single-item retry cache keeps only the latest original and delays eviction until active readers finish. Completed outgoing groups are stored separately and retained across later drags and restarts, so a receiver's file URLs stay valid. Repeating the same group reuses those files. **Reset configuration and login…** removes retained groups as well as the retry cache; interrupted group staging is removed on startup. Receiver-owned copies are outside this app's cache.

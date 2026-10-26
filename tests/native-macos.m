@@ -8,6 +8,8 @@
 static atomic_int references;
 static atomic_int polls;
 static atomic_int copies;
+static atomic_int groupEnds;
+static void groupFinished(void *context, int dropped) { atomic_fetch_add(&groupEnds, 1); }
 static const char *fixture;
 static CFAbsoluteTime readyAfter;
 static void *keep(void *context) { atomic_fetch_add(&references, 1); return context; }
@@ -51,6 +53,27 @@ int main(int argc, const char **argv) {
         NSPasteboard *board = [NSPasteboard pasteboardWithUniqueName];
         if (![board writeObjects:@[provider]]) return 3;
         NSData *expected = [NSData dataWithContentsOfFile:[NSString stringWithUTF8String:fixture]];
+        // Exercise the exact URL writers used by completed multi-file sessions.
+        NSPasteboard *filesBoard = [NSPasteboard pasteboardWithUniqueName];
+        const char *filePaths[] = {fixture, fixture};
+        NSImage *preview = [[NSImage alloc] initWithData:expected];
+        NSArray<NSDraggingItem *> *fileItems = fileDraggingItems(filePaths, 2, preview, NSZeroPoint, 160, 120);
+        if (fileItems.count != 2 || ![filesBoard writeObjects:[fileItems valueForKey:@"item"]]) return 15;
+        NSArray<NSURL *> *urls = [filesBoard readObjectsForClasses:@[[NSURL class]] options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+        if (urls.count != 2) { fprintf(stderr, "FAIL: multi-file payload lost items\n"); return 16; }
+        for (NSURL *url in urls) {
+            if (!url.isFileURL || ![[NSData dataWithContentsOfURL:url] isEqualToData:expected]) return 17;
+        }
+        if ([filesBoard.types containsObject:NSPasteboardTypeString]) return 18;
+        [filesBoard clearContents]; [filesBoard releaseGlobally];
+        atomic_init(&groupEnds, 0);
+        @autoreleasepool {
+            ImmichFilesSource *group = [ImmichFilesSource new]; group.context = (void *)fixture; group.finished = groupFinished;
+            [group finish:YES];
+            [group finish:NO];
+        }
+        if (atomic_load(&groupEnds) != 1) return 19;
+        puts("PASS: native batch payload exposes every completed file URL with original bytes");
         if (!baseline) {
         if (!addChromeContents((ImmichProvider *)provider, board)) { fprintf(stderr, "cannot attach compatibility contents\n"); return 10; }
         testChromiumTarget = NO;

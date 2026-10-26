@@ -11,14 +11,15 @@
 | Earlier generic-item text fallback | Failed in user testing: Finder created a text file and Firefox received only `text/plain` |
 | Current native provider: Finder / Chrome | User confirmed copying to Finder and dragging into Chrome work after the provider fix; no new fixture hash results supplied |
 | Current native provider: Firefox on macOS | **Failed** in the user's retest; currently unsupported |
-| macOS Rust + Objective-C build | `cargo check` passed; debug app bundle built |
-| Rust policy/cache/preview tests | 13 passed, including reset eviction with an active reader and real loopback HTTP failure tests |
-| JavaScript gesture/fixture/setup tests | 11 passed, including no drag-status toast, save/connect and failed reset retry |
-| Off-screen native formats and delegate test | Browser payload/metadata, no text fallback, no non-Chromium rendering, original-file delegate write and reference cleanup checked |
+| macOS Rust + Objective-C build | `cargo check` passed; release app and Intel DMG built; installation remains manual |
+| Rust policy/cache/preview/group tests | 20 passed: group concurrency, exact bytes, retained-group reuse, reset, cancellation, filename collisions, no-overwrite protection, partial cleanup and real loopback HTTP failures |
+| JavaScript gesture/fixture/setup tests | 23 passed: long-hold selection regression, late clicks, Escape cancellation, complete offscreen selections, unchecked items, viewer photos/videos, zoom and editor controls |
+| Off-screen native formats and delegate test | Passed: multi-file URL payload/bytes, exactly-once group completion, single-file browser payload/metadata, no text fallback, original-file delegate write and reference cleanup |
 | Native macOS login-clear callback | Passed against an isolated nonpersistent WebKit store: session cookie present before reset and absent after completion; no user profile touched |
 | Windows native C++ adapter | Implemented; **not compiled or tested here**, no Windows SDK/host |
 | Apple Silicon build/drop | Not tested; Intel macOS host only |
 | Live Immich replacement flow | Not tested against a supplied server/account |
+| Viewer and group drops into Finder / Chrome | Implemented; physical cross-application tests pending, including compatibility with the deployed Immich selection-manager export |
 
 The user's real-photo Chrome result establishes that the compatibility path can deliver an ordinary JPEG `File`; it does not establish a source-hash match or arbitrary download latency. The latest physical retest confirms the revised AppKit provider works with Finder and Chrome. Firefox still fails. The five-second synthetic test and the earlier text-fallback results remain failures.
 
@@ -49,6 +50,17 @@ Chrome on macOS requests promised-content bytes synchronously on drag entry, so 
 9. Open About from the native menu: verify the icon, GPL license (including bundled full text), GitHub link and external-browser launch. Check the app icon in the macOS Dock and Windows taskbar/window.
 10. Choose **Reset configuration and login…** and confirm. It must refuse active transfers, otherwise remove local settings/key/cache and await browser-data deletion, restart to setup, and require login after reconnecting. Check IndexedDB/local storage/cookies as well as the visible login screen. Repeat after interrupting reset: startup must offer reset rather than the old session. Test WebView2 deletion errors and unavailable Keychain credentials. These live lifecycle checks remain pending on both target platforms; compilation and cache tests do not prove browser-session deletion.
 
+## Viewer, group and installation acceptance
+
+1. Drag an unchecked photo and video after holding the mouse stationary for more than 350 ms. Continue the gesture beyond 600 ms, then drop or cancel. Neither item may become checked; a subsequent ordinary click must still work. Repeat while other items are checked and after a preparation failure.
+2. Open a photo/video from the timeline and from an album. Drag the media into Finder and Chrome and compare filename, size and SHA-256 with the original. Verify zoomed-photo panning, crop editing, interactive overlays, playback controls, ordinary clicks and touch interactions remain usable.
+3. Check a mixed photo/video group, including items from months scrolled out of the DOM, and drag a checked thumbnail. Hold until preparation completes. Every selected original must arrive exactly once. Drag an unchecked thumbnail instead: only that item must arrive, and all existing checkboxes must stay unchanged.
+4. Repeat with duplicate filenames, Unicode filenames, uncached originals and a previously prepared group. Release, press Escape, navigate, or close the source during preparation: no late native session or partial file may be delivered. Escape during preparation must not clear the checked selection.
+5. Drag a different group and restart the app: previously exported file URLs must remain valid, completed groups must be reusable, and interrupted staging must disappear. Explicit reset must remove retained groups as well as the single-item retry cache. Group preparation/native sessions must block reset while active.
+6. Run `npm run build` on macOS. Confirm both the app bundle and DMG exist, with no automatic installation or app launch. Open the DMG manually, copy the app into Applications, eject the image and launch the installed app. Repeat on Apple Silicon when a suitable host is available.
+
+Automated tests use modeled Immich DOM/module state and private native pasteboards. They do not establish live upstream module compatibility or a physical Finder/Chrome handoff. Group file URLs use a different path from the deferred single-item browser compatibility representation; previous single-item Firefox failures remain unchanged.
+
 ## Security and outstanding checks
 
 - Different origins, ports, subdomains and frames must not inherit commands. Setup, shell, generic HTTP/filesystem commands remain denied remotely.
@@ -56,4 +68,4 @@ Chrome on macOS requests promised-content bytes synchronously on drag entry, so 
 - Confirm API redirects never forward credentials. Backend tests cover auth/404 errors, traversal filenames, deduplication, truncation, readers, eviction, restart and cancellation.
 - Private-CA trust, disk exhaustion, Windows COM lifetime/Chrome delivery, browser compatibility timeout behavior and adversarial webview ACL enforcement need manual platform checks.
 
-Not implemented: multi-file gestures, viewer-image dragging, percentage progress, popup/custom-scheme OAuth, subpath servers, signing/notarization or Linux support.
+Not implemented: percentage progress, popup/custom-scheme OAuth, subpath servers, signing/notarization or Linux support.

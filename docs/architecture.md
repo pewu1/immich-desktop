@@ -1,6 +1,6 @@
 # Architecture and security
 
-The local Tauri window configures the server and API key. A separate webview loads Immich directly with `ui/immich.js` injected at document start. Existing `data-asset` UUID attributes identify thumbnails. No proxy, frontend fork, image-URL guessing or cookie copying is used.
+The local Tauri window configures the server and API key. A separate webview loads Immich directly with `ui/immich.js` injected at document start. Existing `data-asset` UUID attributes identify thumbnails; the active viewer's `/photos/<UUID>` route identifies opened media. No proxy, frontend fork, image-URL guessing or cookie copying is used.
 
 The setup webview starts hidden. With saved settings, startup opens Immich directly and retains the existing default persistent browser profile; with no settings or an unavailable credential, setup becomes visible. Saving settings opens Immich immediately. Login persistence uses the webview's cookies and browser storage, never a separately saved Immich password. The configuration page contains no test controls. Debug builds expose a separate native drag lab in the Development menu, with its own local-only fixture capability. The injected Immich script adds no status toast or other UI overlay.
 
@@ -8,11 +8,25 @@ The native application menu supplies About and Reset on macOS and the Windows wi
 
 ## Single-gesture flow
 
-Hover/focus and pointer-down prepare filename metadata only. A plain mouse movement beyond eight CSS pixels captures the loaded thumbnail into a PNG canvas, scaled to at most 192 pixels. At that threshold JavaScript invokes `drag_asset` once, including the asset UUID, PNG preview and a private IPC status channel. Rust validates the UUID, preview encoding/dimensions and window origin. It completes any cold metadata lookup, checks the actual OS mouse-button state on the UI thread, starts the original download and begins native deferred dragging. A released mouse never causes a late native session.
+Hover/focus and pointer-down prepare filename metadata and may load the video's existing poster, never an original. Eligible desktop presses stop before Immich's thumbnail long-press timer can select the item. A plain mouse movement beyond eight CSS pixels captures a loaded image/video frame/poster into a PNG canvas, scaled to at most 192 pixels. Click suppression belongs to the consumed gesture and persists until a new trusted press; it has no fixed timeout. Touch, selection controls and modifier gestures remain upstream interactions. Viewer zoom transforms above 1 leave mouse panning to Immich.
+
+For one item JavaScript invokes `drag_asset` with the asset UUID, gesture UUID, PNG preview and a private IPC status channel. Rust validates the IDs, preview and origin. It completes any cold metadata lookup, rechecks gesture cancellation and the actual OS mouse-button state on the UI thread, starts the original download and begins native deferred dragging. `cancel_drag` records cancellation even if it arrives before async command dispatch; a new gesture cancels the previous preparation. Window close also cancels preparation.
 
 The destination receives the original's filename and contents. The PNG is only the drag image; it is never substituted for the original upload. If the original is ready, delivery is immediate. Otherwise the receiver obtains it once the download finishes. Status messages cover readiness, cancellation and failures. Synthetic HTML file drops and remote download URLs are not used.
 
 ## Native adapter and lifetime
+
+### Completed groups
+
+Dragging a checked thumbnail snapshots the full selection from a compatibility-checked export of Immich's selection manager. The adapter inspects same-origin deployed module URLs, imports only a module containing the selection API, and validates the snapshot against rendered checked thumbnails. DOM thumbnails alone are insufficient because Immich removes offscreen months. Missing/incompatible state aborts the gesture instead of exporting a subset. An unchecked thumbnail and the viewer always export their own asset.
+
+`drag_assets` validates/deduplicates up to 10,000 IDs, fetches metadata and streams originals with at most four concurrent requests, and stages the entire group before starting. Cancellation aborts and joins outstanding tasks before staging cleanup. Duplicate names are disambiguated case-insensitively with numbered suffixes without taking another original's name. An item-count badge is drawn into the source preview.
+
+Completed groups live under `originals/outgoing/<profile-and-selection-hash>/files/`, separate from the one-original cache. A manifest records IDs, names and sizes. Publication renames a unique partial directory only after every file is complete; interrupted partial directories are cleaned on restart. Cached single originals can be hard-linked, with disk copying as a fallback. Completed groups are reused and retained until explicit configuration reset, across drags and process restarts. This deliberately avoids invalidating receiver file URLs on the next drag.
+
+macOS starts one NSURL-backed dragging item per file in a stacked native session; Windows publishes a Unicode double-null-terminated `CF_HDROP` list through its data object. Neither group path uses the single promised-content representation, which Chromium reads as one file. Preparation and native sessions hold activity leases that block reset and defer exit. Native completion releases the group lease once, while outgoing files remain retained. Starting a group rechecks cancellation, origin, reset state and the physical mouse button.
+
+### Deferred single items
 
 `src-tauri/native/drag_macos.m` uses `NSFilePromiseProvider`, native `NSDraggingItem` previews and a background operation queue. The promise delegate waits for a completed disk file, copies it to the receiver-provided destination without overwriting an existing file, then invokes the completion handler. The provider strongly owns its otherwise weak delegate. The Rust lease is released once the session ends and outstanding writes finish; a cancelled session releases its lease without waiting for a receiver.
 
@@ -30,7 +44,7 @@ Firefox on macOS is currently unsupported, as confirmed by user testing. Its fil
 
 ## One-file disk cache
 
-The application holds an exclusive process lock before opening its cache. One current manifest identifies the latest dragged asset, partitioned logically by origin/API-key hash. Switching server credentials cannot reuse another profile's original. At most one original is available for retries across the app, including the test lab.
+The application holds an exclusive process lock before opening its cache. One current manifest identifies the latest single dragged asset, partitioned logically by origin/API-key hash. Switching server credentials cannot reuse another profile's original. The single-item retry cache, shared with the test lab, retains at most one original. Completed outgoing groups use the separate retained store described above.
 
 Every new generation has a random UUID directory. Payloads are streamed to `original.partial`, flushed, then renamed to `file/<original filename>`. Only completed files become readable to native providers. The current manifest is written and atomically renamed separately. Metadata is capped at 1 MiB, PNG previews at 256 x 256 and 400,000 encoded characters, and originals at 20 GiB. TLS and authentication errors are sanitized. No full-original bytes are stored in shared state; it holds only paths, metadata, status and synchronization primitives.
 
@@ -42,7 +56,7 @@ On restart, the last valid completed manifest is restored; orphaned generations,
 
 Web login uses the persistent native webview profile. Native downloads use a separate key with `asset.read` and `asset.download`, stored in Keychain / Windows Credential Manager. The settings JSON contains only the server origin. Rust does not read webview cookies or web storage, return API keys to the frontend, or include credentials with transferred files.
 
-All commands participate in Tauri's `AppManifest` ACL. The setup window has only configuration commands, the reset confirmation only its reset command, and the debug lab only its fixture command. The exact configured remote scheme/host/port and `immich` webview receive only `prepare_asset` (metadata) and `drag_asset` (managed original transfer). Status uses the command's own IPC channel, not general event permissions. No arbitrary paths, URLs, generic HTTP, filesystem or shell operations are exposed.
+All commands participate in Tauri's `AppManifest` ACL. The setup window has only configuration commands, the reset confirmation only its reset command, and the debug lab only its fixture command. The exact configured remote scheme/host/port and `immich` webview receive only `prepare_asset`, `drag_asset`, `drag_assets` and `cancel_drag`. Status uses the command's own IPC channel, not general event permissions. No arbitrary paths, URLs, generic HTTP, filesystem or shell operations are exposed.
 
 Both Rust and the injected script check origin; JavaScript additionally rejects subframes. HTTPS OAuth pages may load but inherit no native privileges. Origin is rechecked before native drag begins. Origins reject userinfo, subpaths, queries/fragments and pattern metacharacters. Asset IDs and filenames are validated against traversal and platform-specific device names. PNG previews are decoded with dimension and memory limits before native code sees them.
 
@@ -50,4 +64,4 @@ reqwest uses OS TLS trust with redirects disabled, a 15-second connection timeou
 
 ## Limits
 
-One thumbnail per gesture. Full-screen viewer dragging, multi-selection, percentage progress, popup/custom-scheme OAuth and subpath servers are not implemented. Canvas preview capture requires a loaded, origin-readable thumbnail; a tainted/unavailable image reports an error instead of silently using a placeholder. `data-asset` is upstream DOM, not a versioned API contract. Real deferred drops must be validated on each destination/platform combination.
+Percentage progress, popup/custom-scheme OAuth and subpath servers are not implemented. Canvas preview capture requires loaded, origin-readable media; a tainted/unavailable preview aborts instead of silently using a placeholder. The viewer route, DOM and selection-manager export are upstream integration details, not versioned API contracts. Real single/group drops must be validated on each destination/platform combination.

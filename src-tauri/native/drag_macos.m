@@ -117,6 +117,7 @@ static BOOL addChromeContents(ImmichProvider *promise, NSPasteboard *pasteboard)
     return [item setDataProvider:contents forTypes:@[promise.fileType]];
 }
 static ImmichPromise *activeSource;
+static id activeFilesSource;
 @implementation ImmichPromise
 - (void)dealloc { if (_context) _callbacks.release(_context); }
 - (void)releaseIfFinished {
@@ -268,7 +269,7 @@ int immich_start_drag(void *handle, const char *name, const unsigned char *png, 
     source.context = context; source.callbacks = callbacks;
     source.pasteboardGeneration = -1;
     source.filename = [NSString stringWithUTF8String:name];
-    if (!immich_mouse_down() || activeSource || !source.filename) return 0;
+    if (!immich_mouse_down() || activeSource || activeFilesSource || !source.filename) return 0;
     NSWindow *window = (__bridge NSWindow *)handle;
     NSView *view = window.contentView;
     NSImage *image = [[NSImage alloc] initWithData:[NSData dataWithBytes:png length:png_len]];
@@ -291,5 +292,71 @@ int immich_start_drag(void *handle, const char *name, const unsigned char *png, 
         source.pasteboardGeneration = session.draggingPasteboard.changeCount;
     }
     @catch (NSException *exception) { activeSource = nil; return 0; }
+    return 1;
+}
+
+// Chrome supports multiple existing file URLs, whereas its deferred-content
+// compatibility path exposes only one file. The Rust outgoing store retains
+// these files across drags/restarts; the receiver never sees an evictable path.
+static NSArray<NSDraggingItem *> *fileDraggingItems(const char *const *paths, size_t count,
+    NSImage *image, NSPoint point, uint32_t width, uint32_t height) {
+    NSMutableArray *items = [NSMutableArray new];
+    for (size_t index = 0; index < count; ++index) {
+        NSString *path = [NSString stringWithUTF8String:paths[index]];
+        if (!path || !path.isAbsolutePath || ![[NSFileManager defaultManager] fileExistsAtPath:path]) return nil;
+        NSURL *url = [NSURL fileURLWithPath:path];
+        NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:url];
+        [item setDraggingFrame:NSMakeRect(point.x - width / 2.0, point.y - height / 2.0, width, height) contents:image];
+        [items addObject:item];
+    }
+    return items;
+}
+@interface ImmichFilesSource : NSObject <NSDraggingSource>
+@property void *context;
+@property void (*finished)(void *, int);
+- (void)finish:(BOOL)dropped;
+@end
+@implementation ImmichFilesSource
+- (void)dealloc { if (_context) _finished(_context, 0); }
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
+    return NSDragOperationCopy;
+}
+- (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)point operation:(NSDragOperation)operation {
+    [self finish:operation != NSDragOperationNone];
+    NSPasteboard *pasteboard = session.draggingPasteboard;
+    NSInteger generation = pasteboard.changeCount;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+        if (pasteboard.changeCount == generation) [pasteboard clearContents];
+    });
+    activeFilesSource = nil;
+}
+- (void)finish:(BOOL)dropped {
+    if (_context) { void *context = _context; _context = NULL; _finished(context, dropped); }
+}
+@end
+int immich_start_files_drag(void *handle, const char *const *paths, size_t count,
+    const unsigned char *png, size_t png_len, const unsigned char *rgba,
+    uint32_t width, uint32_t height, void *context, void (*finished)(void *, int)) {
+    (void)rgba;
+    if (!count || !immich_mouse_down() || activeSource || activeFilesSource) return 0;
+    NSWindow *window = (__bridge NSWindow *)handle;
+    NSView *view = window.contentView;
+    NSImage *image = [[NSImage alloc] initWithData:[NSData dataWithBytes:png length:png_len]];
+    if (!view || !image) return 0;
+    NSPoint point = [view convertPoint:window.mouseLocationOutsideOfEventStream fromView:nil];
+    NSArray *items = fileDraggingItems(paths, count, image, point, width, height);
+    if (items.count != count) return 0;
+    NSEvent *event = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDragged location:window.mouseLocationOutsideOfEventStream
+        modifierFlags:0 timestamp:NSApp.currentEvent.timestamp windowNumber:window.windowNumber
+        context:nil eventNumber:0 clickCount:1 pressure:1];
+    ImmichFilesSource *source = [ImmichFilesSource new];
+    source.context = context; source.finished = finished;
+    activeFilesSource = source;
+    @try {
+        NSDraggingSession *session = [view beginDraggingSessionWithItems:items event:event source:source];
+        session.draggingFormation = NSDraggingFormationStack;
+    } @catch (NSException *exception) {
+        source.context = NULL; activeFilesSource = nil; return 0;
+    }
     return 1;
 }

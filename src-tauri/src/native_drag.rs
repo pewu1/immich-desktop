@@ -1,10 +1,10 @@
 //! Deferred native delivery. Only preview pixels and paths cross the native boundary.
-use crate::cache::{emit, Transfer};
+use crate::cache::{emit, Activity, Events, Transfer};
 use base64::Engine;
 use std::{
     ffi::{c_char, c_void, CStr, CString},
     io::Cursor,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -101,6 +101,108 @@ extern "C" {
         callbacks: Callbacks,
     ) -> i32;
     fn immich_mouse_down() -> i32;
+    // Takes the context only on success; finished is called exactly once.
+    fn immich_start_files_drag(
+        window: *mut c_void,
+        paths: *const *const c_char,
+        count: usize,
+        png: *const u8,
+        png_len: usize,
+        rgba: *const u8,
+        width: u32,
+        height: u32,
+        context: *mut c_void,
+        finished: unsafe extern "C" fn(*mut c_void, i32),
+    ) -> i32;
+}
+struct FileSession {
+    _activity: Activity,
+    events: Events,
+}
+unsafe extern "C" fn files_finished(context: *mut c_void, dropped: i32) {
+    let session = Box::from_raw(context.cast::<FileSession>());
+    DRAGGING.store(false, Ordering::Release);
+    emit(
+        &session.events,
+        if dropped != 0 { "dropped" } else { "cancelled" },
+        "Group drag ended; outgoing files remain available until configuration reset",
+    );
+}
+pub fn start_files(
+    window: WebviewWindow,
+    paths: Vec<PathBuf>,
+    preview: Preview,
+    events: Events,
+    activity: Activity,
+) -> Result<(), String> {
+    if paths.is_empty()
+        || paths
+            .iter()
+            .any(|path| !path.is_absolute() || !path.is_file())
+    {
+        return Err("Group originals are not ready".into());
+    }
+    let names = paths
+        .iter()
+        .map(|path| {
+            path.to_str()
+                .ok_or("Invalid outgoing path")
+                .and_then(|path| CString::new(path).map_err(|_| "Invalid outgoing path"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    #[cfg(target_os = "macos")]
+    let handle = window
+        .ns_window()
+        .map_err(|_| "Native window unavailable")?;
+    #[cfg(target_os = "windows")]
+    let handle = window.hwnd().map_err(|_| "Native window unavailable")?.0 as *mut c_void;
+    if !mouse_down() {
+        return Err("Mouse released before group drag started".into());
+    }
+    if DRAGGING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("Another native drag is active".into());
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let pointers = names.iter().map(|name| name.as_ptr()).collect::<Vec<_>>();
+        emit(&events, "dragging", "Dragging selected originals");
+        let context = Box::into_raw(Box::new(FileSession {
+            _activity: activity,
+            events,
+        }))
+        .cast();
+        let ok = unsafe {
+            immich_start_files_drag(
+                handle,
+                pointers.as_ptr(),
+                pointers.len(),
+                preview.png.as_ptr(),
+                preview.png.len(),
+                preview.rgba.as_ptr(),
+                preview.width,
+                preview.height,
+                context,
+                files_finished,
+            )
+        };
+        if ok == 0 {
+            unsafe {
+                drop(Box::from_raw(context.cast::<FileSession>()));
+            }
+            DRAGGING.store(false, Ordering::Release);
+            return Err("Native group drag could not start".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (window, names, preview, events, activity);
+        DRAGGING.store(false, Ordering::Release);
+        Err("macOS and Windows only".into())
+    }
 }
 unsafe extern "C" fn retain(context: *mut c_void) -> *mut c_void {
     Arc::increment_strong_count(context as *const Transfer);

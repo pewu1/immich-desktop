@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod batch;
 mod cache;
 mod desktop;
 mod immich;
@@ -50,6 +51,11 @@ fn main() {
             if window.label() == "immich"
                 && matches!(event, tauri::WindowEvent::CloseRequested { .. })
             {
+                window
+                    .app_handle()
+                    .state::<immich::DesktopState>()
+                    .batches
+                    .cancel_current();
                 window.app_handle().exit(0);
             }
         })
@@ -75,6 +81,7 @@ fn main() {
                 _cache_lock: lock,
                 cache: cache::Cache::new(root.join("originals"))?,
                 resetting: std::sync::atomic::AtomicBool::new(false),
+                batches: std::sync::Arc::new(batch::Control::default()),
             });
             desktop::install_menu(app)?;
             desktop::startup(app.handle().clone());
@@ -87,6 +94,8 @@ fn main() {
             immich::open_immich,
             immich::prepare_asset,
             immich::drag_asset,
+            immich::drag_assets,
+            immich::cancel_drag,
             desktop::reset_configuration
         ])
         .build(tauri::generate_context!())

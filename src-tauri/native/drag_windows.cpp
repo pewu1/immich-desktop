@@ -112,6 +112,7 @@ class FileData final : public IDataObject, public IDataObjectAsyncCapability {
     std::atomic<ULONG> refs{1}; std::atomic<bool> asyncMode{true}, inOperation{false};
     void *ctx; ImmichCallbacks cb; std::wstring name; DWORD uiThread;
     CLIPFORMAT descriptor, contents, effect;
+    std::vector<std::wstring> paths;
     ComPtr<IUnknown> marshaler; std::mutex gate;
     std::map<CLIPFORMAT, std::vector<unsigned char>> extra;
     HRESULT memory(const void *bytes, size_t len, STGMEDIUM *out) {
@@ -126,7 +127,8 @@ public:
         effect = RegisterClipboardFormatW(L"Preferred DropEffect");
         CoCreateFreeThreadedMarshaler(static_cast<IDataObject *>(this), &marshaler);
     }
-    ~FileData() { cb.release(ctx); }
+    FileData(std::vector<std::wstring> files) : FileData(nullptr, {}, L"") { paths = std::move(files); }
+    ~FileData() { if (ctx) cb.release(ctx); }
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void **out) override {
         if (!out) return E_POINTER; *out = nullptr;
         if (id == IID_IUnknown || id == IID_IDataObject) *out = static_cast<IDataObject *>(this);
@@ -139,6 +141,19 @@ public:
     HRESULT STDMETHODCALLTYPE GetData(FORMATETC *fmt, STGMEDIUM *out) override {
         if (!fmt || !out) return E_POINTER; *out = {};
         HRESULT hr = QueryGetData(fmt); if (FAILED(hr)) return hr;
+        if (fmt->cfFormat == CF_HDROP && !paths.empty()) {
+            size_t chars = 1;
+            for (const auto &path : paths) chars += path.size() + 1;
+            std::vector<unsigned char> bytes(sizeof(DROPFILES) + chars * sizeof(wchar_t), 0);
+            auto *header = reinterpret_cast<DROPFILES *>(bytes.data());
+            header->pFiles = sizeof(DROPFILES); header->fWide = TRUE;
+            size_t offset = sizeof(DROPFILES);
+            for (const auto &path : paths) {
+                size_t length = (path.size() + 1) * sizeof(wchar_t);
+                std::memcpy(bytes.data() + offset, path.c_str(), length); offset += length;
+            }
+            return memory(bytes.data(), bytes.size(), out);
+        }
         if (fmt->cfFormat == contents) {
             out->tymed = TYMED_ISTREAM; out->pstm = new FileStream(ctx, cb, uiThread, name); return S_OK;
         }
@@ -155,6 +170,11 @@ public:
     HRESULT STDMETHODCALLTYPE GetDataHere(FORMATETC *, STGMEDIUM *) override { return DATA_E_FORMATETC; }
     HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC *fmt) override {
         if (!fmt) return E_POINTER; if (fmt->dwAspect != DVASPECT_CONTENT) return DV_E_DVASPECT;
+        if (!paths.empty()) {
+            if (!(fmt->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
+            if (fmt->cfFormat == CF_HDROP || fmt->cfFormat == effect) return S_OK;
+            std::lock_guard<std::mutex> lock(gate); return extra.count(fmt->cfFormat) ? S_OK : DV_E_FORMATETC;
+        }
         if (fmt->cfFormat == contents) return fmt->lindex != 0 ? DV_E_LINDEX : ((fmt->tymed & TYMED_ISTREAM) ? S_OK : DV_E_TYMED);
         if (!(fmt->tymed & TYMED_HGLOBAL)) return DV_E_TYMED;
         if (fmt->cfFormat == descriptor || fmt->cfFormat == effect) return S_OK;
@@ -173,6 +193,10 @@ public:
     }
     HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD direction, IEnumFORMATETC **out) override {
         if (direction != DATADIR_GET) return E_NOTIMPL;
+        if (!paths.empty()) {
+            FORMATETC formats[] = {{CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}, {effect, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}};
+            return SHCreateStdEnumFmtEtc(2, formats, out);
+        }
         FORMATETC formats[] = {{descriptor, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}, {contents, nullptr, DVASPECT_CONTENT, 0, TYMED_ISTREAM}, {effect, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}};
         return SHCreateStdEnumFmtEtc(3, formats, out);
     }
@@ -202,13 +226,7 @@ public:
     HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
 };
 int immich_mouse_down(void) { return (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0; }
-int immich_start_drag(void *, const char *name, const unsigned char *, size_t,
-    const unsigned char *rgba, uint32_t width, uint32_t height, void *ctx, ImmichCallbacks cb) {
-    if (!immich_mouse_down()) { cb.release(ctx); return 0; }
-    HRESULT init = OleInitialize(nullptr);
-    if (FAILED(init)) { cb.release(ctx); return 0; }
-    {
-        ComPtr<IDataObject> data; data.Attach(new FileData(ctx, cb, wide(name)));
+static bool runDrag(ComPtr<IDataObject> data, const unsigned char *rgba, uint32_t width, uint32_t height) {
         ComPtr<IDropSource> source; source.Attach(new Source());
         ComPtr<IDragSourceHelper> helper;
         HBITMAP bitmap = nullptr;
@@ -228,8 +246,35 @@ int immich_start_drag(void *, const char *name, const unsigned char *, size_t,
             }
         }
         DWORD effect = 0; HRESULT result = DoDragDrop(data.Get(), source.Get(), DROPEFFECT_COPY, &effect);
-        cb.ended(ctx, result == DRAGDROP_S_DROP);
         if (bitmap) DeleteObject(bitmap);
+        return result == DRAGDROP_S_DROP;
+}
+int immich_start_drag(void *, const char *name, const unsigned char *, size_t,
+    const unsigned char *rgba, uint32_t width, uint32_t height, void *ctx, ImmichCallbacks cb) {
+    if (!immich_mouse_down()) { cb.release(ctx); return 0; }
+    HRESULT init = OleInitialize(nullptr);
+    if (FAILED(init)) { cb.release(ctx); return 0; }
+    {
+        ComPtr<IDataObject> data; data.Attach(new FileData(ctx, cb, wide(name)));
+        cb.ended(ctx, runDrag(data, rgba, width, height));
+    }
+    OleUninitialize(); return 1;
+}
+int immich_start_files_drag(void *, const char *const *paths, size_t count,
+    const unsigned char *, size_t, const unsigned char *rgba,
+    uint32_t width, uint32_t height, void *context, void (*finished)(void *, int)) {
+    if (!count || !immich_mouse_down()) return 0;
+    std::vector<std::wstring> files;
+    for (size_t index = 0; index < count; ++index) {
+        auto path = wide(paths[index]);
+        DWORD attributes = path.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+        files.push_back(std::move(path));
+    }
+    HRESULT init = OleInitialize(nullptr); if (FAILED(init)) return 0;
+    {
+        ComPtr<IDataObject> data; data.Attach(new FileData(std::move(files)));
+        finished(context, runDrag(data, rgba, width, height));
     }
     OleUninitialize(); return 1;
 }

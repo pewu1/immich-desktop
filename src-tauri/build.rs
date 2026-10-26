@@ -33,6 +33,8 @@ fn main() {
             "open_immich",
             "prepare_asset",
             "drag_asset",
+            "drag_assets",
+            "cancel_drag",
             "reset_configuration",
         ]),
     ))

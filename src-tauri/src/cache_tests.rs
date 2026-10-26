@@ -291,3 +291,23 @@ async fn eviction_cancels_only_unneeded_downloads() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn staging_and_downloads_never_overwrite_an_existing_group_item() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("source.jpg");
+    let destination = temp.path().join("original.jpg");
+    std::fs::write(&source, b"source").unwrap();
+    std::fs::write(&destination, b"keep").unwrap();
+    assert!(stage_original(&source, &destination).await.is_err());
+    let (url, server) = mock(vec![response(200, b"replacement")]);
+    assert!(download_file(&destination, &url, A, "test-key", &client())
+        .await
+        .is_err());
+    server.join().unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), b"keep");
+    let linked = temp.path().join("linked.jpg");
+    stage_original(&source, &linked).await.unwrap();
+    std::fs::remove_file(source).unwrap();
+    assert_eq!(std::fs::read(linked).unwrap(), b"source");
+}

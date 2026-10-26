@@ -15,6 +15,26 @@ use tauri::{ipc::Channel, Url};
 use tokio::io::AsyncWriteExt;
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static EXIT_WHEN_DONE: Mutex<Option<tauri::AppHandle>> = Mutex::new(None);
+// Group preparation and native sessions also prevent reset/process exit.
+pub struct Activity;
+impl Activity {
+    pub fn new() -> Self {
+        ACTIVE.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+impl Drop for Activity {
+    fn drop(&mut self) {
+        release_activity();
+    }
+}
+fn release_activity() {
+    if ACTIVE.fetch_sub(1, Ordering::AcqRel) == 1 {
+        if let Some(app) = EXIT_WHEN_DONE.lock().unwrap().take() {
+            app.exit(0);
+        }
+    }
+}
 pub fn has_active_transfers() -> bool {
     ACTIVE.load(Ordering::Acquire) != 0
 }
@@ -85,11 +105,7 @@ impl Drop for Transfer {
     fn drop(&mut self) {
         self.job.readers.fetch_sub(1, Ordering::AcqRel);
         self.job.changed.notify_waiters();
-        if ACTIVE.fetch_sub(1, Ordering::AcqRel) == 1 {
-            if let Some(app) = EXIT_WHEN_DONE.lock().unwrap().take() {
-                app.exit(0);
-            }
-        }
+        release_activity();
     }
 }
 impl Transfer {
@@ -177,7 +193,20 @@ pub struct Cache {
     current: Mutex<Option<Arc<Job>>>,
 }
 impl Cache {
+    pub fn outgoing_root(&self) -> PathBuf {
+        self.root.join("outgoing")
+    }
+    pub fn cached_original(&self, key: &str) -> Option<ReadyFile> {
+        let current = self.current.lock().ok()?;
+        let job = current.as_ref().filter(|job| job.key == key)?;
+        let result = job.result.lock().ok()?;
+        result.as_ref()?.as_ref().ok().cloned()
+    }
     pub fn clear(&self) -> Result<(), String> {
+        let outgoing = self.outgoing_root();
+        if outgoing.exists() {
+            std::fs::remove_dir_all(outgoing).map_err(io_error)?;
+        }
         let mut current = self.current.lock().map_err(|_| "Cache state unavailable")?;
         match std::fs::remove_file(self.root.join("current.json")) {
             Ok(()) => {}
@@ -192,6 +221,7 @@ impl Cache {
     }
     pub fn new(root: PathBuf) -> Result<Arc<Self>, String> {
         std::fs::create_dir_all(&root).map_err(io_error)?;
+        crate::batch::clean_partial(&root.join("outgoing"))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -452,6 +482,16 @@ async fn download(
     key: &str,
     client: &Client,
 ) -> Result<u64, String> {
+    download_file(&job.dir.join("original.partial"), server, id, key, client).await
+}
+pub async fn download_file(
+    destination: &Path,
+    server: &Url,
+    id: &str,
+    key: &str,
+    client: &Client,
+) -> Result<u64, String> {
+    let id = policy::asset_id(id)?;
     let mut response = checked(
         client
             .get(server.join(&format!("api/assets/{id}/original")).unwrap())
@@ -464,7 +504,10 @@ async fn download(
     if expected.is_some_and(|n| n > MAX_BYTES) {
         return Err("Original exceeds 20 GiB limit".into());
     }
-    let mut file = tokio::fs::File::create(job.dir.join("original.partial"))
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
         .await
         .map_err(io_error)?;
     let mut size = 0;
@@ -484,4 +527,24 @@ async fn download(
     }
     file.sync_all().await.map_err(io_error)?;
     Ok(size)
+}
+
+pub async fn stage_original(source: &Path, destination: &Path) -> Result<(), String> {
+    if tokio::fs::hard_link(source, destination).await.is_ok() {
+        return Ok(());
+    }
+    let mut source = tokio::fs::File::open(source).await.map_err(io_error)?;
+    // create_new also rejects filesystem-normalized filename collisions that
+    // a Unicode string comparison cannot detect. Never replace another item.
+    let mut target = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .await
+        .map_err(io_error)?;
+    tokio::io::copy(&mut source, &mut target)
+        .await
+        .map_err(io_error)?;
+    target.sync_all().await.map_err(io_error)?;
+    Ok(())
 }

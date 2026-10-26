@@ -20,6 +20,7 @@ pub struct DesktopState {
     pub _cache_lock: std::fs::File,
     pub cache: Arc<Cache>,
     pub resetting: std::sync::atomic::AtomicBool,
+    pub batches: Arc<crate::batch::Control>,
 }
 
 pub struct Profile {
@@ -167,12 +168,12 @@ pub async fn open_configured(app: AppHandle, state: &DesktopState) -> Result<(),
                 namespace,
                 metadata: tokio::sync::Mutex::new(HashMap::new()),
             });
-            // Add once per process. Only these two app commands are granted to this exact origin.
+            // Add once per process. Only media-transfer commands are granted to this exact origin.
             let capability = serde_json::json!({
                 "identifier": "configured-immich", "local": false,
                 "webviews": ["immich"],
                 "remote": { "urls": [format!("{}/*", profile.server.origin().ascii_serialization())] },
-                "permissions": ["allow-prepare-asset", "allow-drag-asset"]
+                "permissions": ["allow-prepare-asset", "allow-drag-asset", "allow-drag-assets", "allow-cancel-drag"]
             });
             app.add_capability(capability.to_string())
                 .map_err(|_| "Cannot authorize the configured Immich origin")?;
@@ -187,6 +188,7 @@ pub async fn open_configured(app: AppHandle, state: &DesktopState) -> Result<(),
         include_str!("../../ui/immich.js")
     );
     let allowed_origin = profile.server.origin();
+    let navigation_app = app.clone();
     // Build from this async command/startup worker. Creating a WebView2 window
     // synchronously inside a main-thread event handler can deadlock on Windows.
     WebviewWindowBuilder::new(&app, "immich", WebviewUrl::External(profile.server.clone()))
@@ -195,7 +197,12 @@ pub async fn open_configured(app: AppHandle, state: &DesktopState) -> Result<(),
         .disable_drag_drop_handler()
         .initialization_script(script)
         // HTTPS identity-provider redirects may load, but receive no native capability.
-        .on_navigation(move |url| url.origin() == allowed_origin || url.scheme() == "https")
+        .on_navigation(move |url| {
+            if let Some(state) = navigation_app.try_state::<DesktopState>() {
+                state.batches.cancel_current();
+            }
+            url.origin() == allowed_origin || url.scheme() == "https"
+        })
         .build()
         .map_err(|_| "Cannot open Immich webview")?;
     if let Some(setup) = app.get_webview_window("main") {
@@ -256,23 +263,31 @@ pub async fn drag_asset(
     window: WebviewWindow,
     state: State<'_, DesktopState>,
     asset_id: String,
+    gesture_id: String,
     preview_png: String,
     on_event: Events,
 ) -> Result<(), String> {
     let profile = remote(&window, &state)?;
     let id = policy::asset_id(&asset_id)?;
     let preview = Preview::parse(&preview_png)?;
-    let metadata = describe(&profile, &id).await?;
+    let ticket = state.batches.begin(&gesture_id)?;
+    remote(&window, &state)?;
+    let metadata = tokio::select! {
+        biased;
+        _ = ticket.cancelled() => return Err("Drag cancelled during metadata preparation".into()),
+        metadata = describe(&profile, &id) => metadata?,
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
     let main_thread = window.clone();
     window
         .run_on_main_thread(move || {
             // Check again when the OS drag actually starts, after scheduling.
-            let permitted = !main_thread
-                .app_handle()
-                .state::<DesktopState>()
-                .resetting
-                .load(std::sync::atomic::Ordering::Acquire)
+            let permitted = ticket.check().is_ok()
+                && !main_thread
+                    .app_handle()
+                    .state::<DesktopState>()
+                    .resetting
+                    .load(std::sync::atomic::Ordering::Acquire)
                 && main_thread
                     .url()
                     .is_ok_and(|url| url.origin() == profile.server.origin());
@@ -295,4 +310,332 @@ pub async fn drag_asset(
         })
         .map_err(|_| "Cannot schedule native drag")?;
     rx.await.map_err(|_| "Native drag interrupted")?
+}
+
+#[tauri::command]
+pub fn cancel_drag(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    gesture_id: String,
+) -> Result<(), String> {
+    remote(&window, &state)?;
+    state.batches.cancel(&gesture_id)
+}
+
+async fn collect_group<T: Send + 'static>(
+    mut tasks: tokio::task::JoinSet<Result<(usize, T), String>>,
+    count: usize,
+    ticket: &crate::batch::Ticket,
+) -> Result<Vec<T>, String> {
+    let mut ordered: Vec<Option<T>> = (0..count).map(|_| None).collect();
+    loop {
+        let result = tokio::select! {
+            biased;
+            _ = ticket.cancelled() => Err("Group drag cancelled".to_string()),
+            result = tasks.join_next() => match result {
+                None => break,
+                Some(Ok(result)) => result,
+                Some(Err(_)) => Err("Group preparation interrupted".into()),
+            },
+        };
+        match result {
+            Ok((index, value)) => ordered[index] = Some(value),
+            Err(error) => {
+                tasks.shutdown().await;
+                return Err(error);
+            }
+        }
+    }
+    ordered
+        .into_iter()
+        .map(|value| value.ok_or_else(|| "Incomplete outgoing group".into()))
+        .collect()
+}
+
+async fn prepare_group(
+    profile: Arc<Profile>,
+    ids: Vec<String>,
+    ticket: &crate::batch::Ticket,
+) -> Result<Vec<PathBuf>, String> {
+    use crate::batch;
+    let root = profile.cache.outgoing_root();
+    ticket.check()?;
+    let key = batch::key(&profile.namespace, &ids);
+    if let Some(paths) = batch::existing(&root, &key, &ids) {
+        return Ok(paths);
+    }
+    let staging = batch::Staging::new(&root)?;
+    let mut originals = Vec::new();
+    // Both metadata and original-file requests have bounded concurrency.
+    for chunk in ids.chunks(4) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, id) in chunk.iter().enumerate() {
+            let profile = profile.clone();
+            let id = id.clone();
+            tasks.spawn(async move {
+                describe(&profile, &id)
+                    .await
+                    .map(|metadata| (index, metadata.original_file_name))
+            });
+        }
+        originals.extend(collect_group(tasks, chunk.len(), ticket).await?);
+    }
+    let names = batch::names(&originals)?;
+    let mut files = Vec::new();
+    for (id_chunk, name_chunk) in ids.chunks(4).zip(names.chunks(4)) {
+        let mut tasks = tokio::task::JoinSet::new();
+        for (index, (id, name)) in id_chunk.iter().zip(name_chunk).enumerate() {
+            let profile = profile.clone();
+            let id = id.clone();
+            let name = name.clone();
+            let destination = staging.dir.join("files").join(&name);
+            tasks.spawn(async move {
+                let cached = profile
+                    .cache
+                    .cached_original(&format!("{}:{}", profile.namespace, id));
+                let size = if let Some(ready) = cached {
+                    cache::stage_original(&ready.path, &destination).await?;
+                    ready.size
+                } else {
+                    cache::download_file(
+                        &destination,
+                        &profile.server,
+                        &id,
+                        &profile.key,
+                        &profile.client,
+                    )
+                    .await?
+                };
+                Ok::<_, String>((index, batch::File { id, name, size }))
+            });
+        }
+        files.extend(collect_group(tasks, id_chunk.len(), ticket).await?);
+    }
+    ticket.check()?;
+    staging.commit(&root, &key, &files)
+}
+
+#[tauri::command]
+pub async fn drag_assets(
+    window: WebviewWindow,
+    state: State<'_, DesktopState>,
+    asset_ids: Vec<String>,
+    gesture_id: String,
+    preview_png: String,
+    on_event: Events,
+) -> Result<(), String> {
+    let profile = remote(&window, &state)?;
+    let ids = crate::batch::ids(asset_ids)?;
+    let preview = Preview::parse(&preview_png)?;
+    let mut ticket = state.batches.begin(&gesture_id)?;
+    // Close the race between registering the activity and reset's initial check.
+    remote(&window, &state)?;
+    cache::emit(
+        &on_event,
+        "preparing",
+        "Preparing selected originals; keep the mouse held",
+    );
+    let paths = prepare_group(profile.clone(), ids, &ticket).await?;
+    ticket.check()?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let main_thread = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let result = (|| {
+                ticket.check()?;
+                remote(
+                    &main_thread,
+                    main_thread.app_handle().state::<DesktopState>().inner(),
+                )?;
+                if !native_drag::mouse_down() {
+                    return Err("Mouse released before group drag started".into());
+                }
+                native_drag::start_files(
+                    main_thread,
+                    paths,
+                    preview,
+                    on_event,
+                    ticket.activity.take().ok_or("Drag lease unavailable")?,
+                )
+            })();
+            let _ = tx.send(result);
+        })
+        .map_err(|_| "Cannot schedule group drag")?;
+    rx.await.map_err(|_| "Group drag interrupted")?
+}
+
+#[cfg(test)]
+mod group_tests {
+    use super::*;
+    use crate::batch;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        thread,
+    };
+
+    struct Server {
+        url: Url,
+        stop: Arc<AtomicBool>,
+        requests: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+    impl Server {
+        fn new(fail_original: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let (worker_stop, worker_requests, worker_peak) =
+                (stop.clone(), requests.clone(), peak.clone());
+            let thread = thread::spawn(move || {
+                let active = Arc::new(AtomicUsize::new(0));
+                let mut workers = Vec::new();
+                while !worker_stop.load(Ordering::Acquire) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(error) => panic!("Test listener failed: {error}"),
+                    };
+                    let (active, requests, peak) =
+                        (active.clone(), worker_requests.clone(), worker_peak.clone());
+                    workers.push(thread::spawn(move || {
+                        stream.set_nonblocking(false).unwrap();
+                        stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                        let mut request = Vec::new(); let mut byte = [0];
+                        while !request.ends_with(b"\r\n\r\n") {
+                            if stream.read_exact(&mut byte).is_err() { return; }
+                            request.push(byte[0]); assert!(request.len() < 8192);
+                        }
+                        let request = String::from_utf8(request).unwrap();
+                        assert!(request.to_lowercase().contains("x-api-key: test-key"));
+                        let path = request.split_whitespace().nth(1).unwrap();
+                        let original = path.ends_with("/original");
+                        requests.fetch_add(1, Ordering::AcqRel);
+                        peak.fetch_max(active.fetch_add(1, Ordering::AcqRel) + 1, Ordering::AcqRel);
+                        thread::sleep(Duration::from_millis(20));
+                        let (status, body) = if original && fail_original { (403, Vec::new()) }
+                            else if original { (200, path.as_bytes().to_vec()) }
+                            else { (200, br#"{"originalFileName":"same.jpg"}"#.to_vec()) };
+                        let header = format!("HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                        let _ = stream.write_all(header.as_bytes()).and_then(|_| stream.write_all(&body));
+                        active.fetch_sub(1, Ordering::AcqRel);
+                    }));
+                }
+                for worker in workers {
+                    worker.join().unwrap();
+                }
+            });
+            Self {
+                url,
+                stop,
+                requests,
+                peak,
+                thread: Some(thread),
+            }
+        }
+    }
+    impl Drop for Server {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            self.thread.take().unwrap().join().unwrap();
+        }
+    }
+    fn profile(root: &std::path::Path, url: Url) -> Arc<Profile> {
+        Arc::new(Profile {
+            server: url,
+            key: "test-key".into(),
+            namespace: "account".into(),
+            client: Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .unwrap(),
+            cache: Cache::new(root.into()).unwrap(),
+            metadata: tokio::sync::Mutex::new(HashMap::new()),
+        })
+    }
+    #[tokio::test]
+    async fn group_downloads_are_bounded_exact_and_reused_after_restart_until_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(false);
+        let profile = profile(temp.path(), server.url.clone());
+        let ids: Vec<String> = (0..6).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+        let control = Arc::new(batch::Control::default());
+        let ticket = control.begin(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let paths = prepare_group(profile.clone(), ids.clone(), &ticket)
+            .await
+            .unwrap();
+        assert_eq!(paths.len(), 6);
+        for (path, id) in paths.iter().zip(&ids) {
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                format!("/api/assets/{id}/original").as_bytes()
+            );
+        }
+        assert_eq!(paths[0].file_name().unwrap(), "same.jpg");
+        assert_eq!(paths[1].file_name().unwrap(), "same (2).jpg");
+        assert!(server.peak.load(Ordering::Acquire) <= 4);
+        assert!(server.peak.load(Ordering::Acquire) > 1);
+        let requests = server.requests.load(Ordering::Acquire);
+        assert_eq!(requests, 12);
+        let reopened = Cache::new(temp.path().into()).unwrap();
+        assert!(paths.iter().all(|path| path.exists()));
+        assert_eq!(
+            prepare_group(profile.clone(), ids, &ticket).await.unwrap(),
+            paths
+        );
+        assert_eq!(server.requests.load(Ordering::Acquire), requests);
+        reopened.clear().unwrap();
+        assert!(paths.iter().all(|path| !path.exists()));
+    }
+    #[tokio::test]
+    async fn failed_group_never_publishes_partial_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(true);
+        let profile = profile(temp.path(), server.url.clone());
+        let control = Arc::new(batch::Control::default());
+        let ticket = control.begin(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let ids = vec![
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        ];
+        assert!(prepare_group(profile.clone(), ids, &ticket).await.is_err());
+        assert_eq!(
+            std::fs::read_dir(profile.cache.outgoing_root())
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+    #[tokio::test]
+    async fn cancellation_stops_preparation_and_removes_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = Server::new(false);
+        let profile = profile(temp.path(), server.url.clone());
+        let control = Arc::new(batch::Control::default());
+        let id = uuid::Uuid::new_v4().to_string();
+        let ticket = control.begin(&id).unwrap();
+        let ids = (0..8).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            control.cancel(&id).unwrap();
+        };
+        let (result, ()) = tokio::join!(prepare_group(profile.clone(), ids, &ticket), cancel);
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_dir(profile.cache.outgoing_root())
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(server.requests.load(Ordering::Acquire) <= 4);
+    }
 }

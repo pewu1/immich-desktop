@@ -19,6 +19,11 @@ typedef struct {
 int immich_start_drag(void *window, const char *name, const unsigned char *png, size_t png_len,
     const unsigned char *rgba, uint32_t width, uint32_t height, void *context, ImmichCallbacks callbacks);
 int immich_mouse_down(void);
+// Existing, retained outgoing files. Takes context only on success; finished
+// is invoked exactly once when the session ends (possibly before return).
+int immich_start_files_drag(void *window, const char *const *paths, size_t count,
+    const unsigned char *png, size_t png_len, const unsigned char *rgba,
+    uint32_t width, uint32_t height, void *context, void (*finished)(void *, int));
 #ifdef __cplusplus
 }
 #endif
