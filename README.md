@@ -173,6 +173,8 @@ Use **Immich Desktop → Reset configuration and login…** in the macOS menu ba
 
 The injected drag handler adds no status toast or overlay to Immich. The development drag lab retains its diagnostic status display.
 
+The main Immich window remembers its size, position, maximized state and fullscreen state when the app closes, and restores them on the next launch. A disconnected monitor falls back to placement on an available display. Window state is stored separately from connection settings, so resetting login/configuration preserves the window layout.
+
 For a private development CA, trust it in the OS store used by both the webview and Rust's native TLS client. There is no TLS-validation bypass. Configure the final HTTPS origin; API redirects are refused. HTTPS OAuth pages may load but receive no native privileges. Popup/custom-scheme login flows need testing.
 
 ## Troubleshooting compilation and launch

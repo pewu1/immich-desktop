@@ -8,6 +8,11 @@ mod native_drag;
 mod policy;
 
 use tauri::Manager;
+use tauri_plugin_window_state::StateFlags;
+const WINDOW_STATE_FLAGS: StateFlags = StateFlags::SIZE
+    .union(StateFlags::POSITION)
+    .union(StateFlags::MAXIMIZED)
+    .union(StateFlags::FULLSCREEN);
 
 #[tauri::command]
 async fn drag_test_file(
@@ -47,6 +52,12 @@ async fn drag_test_file(
 
 fn main() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(|label| label == "immich")
+                .with_state_flags(WINDOW_STATE_FLAGS)
+                .build(),
+        )
         .on_window_event(|window, event| {
             if window.label() == "immich"
                 && matches!(event, tauri::WindowEvent::CloseRequested { .. })

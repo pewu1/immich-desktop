@@ -5,6 +5,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
+use tauri_plugin_window_state::AppHandleExt;
 
 pub fn reset_pending(app: &AppHandle) -> bool {
     immich::config_path(app).is_ok_and(|p| p.with_file_name("reset-pending.json").exists())
@@ -197,6 +198,23 @@ pub async fn reset_configuration(
     app.restart();
 }
 
+async fn save_window_layout(app: &AppHandle) {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let save_app = app.clone();
+    // Plugin state capture queries native windows while holding its cache
+    // lock. Run on the UI thread so resize/move handlers cannot deadlock it.
+    if app
+        .run_on_main_thread(move || {
+            let _ = tx.send(save_app.save_window_state(crate::WINDOW_STATE_FLAGS));
+        })
+        .is_ok()
+    {
+        if let Ok(Err(error)) = rx.await {
+            eprintln!("Cannot save window layout before reset: {error}");
+        }
+    }
+}
+
 async fn reset(app: &AppHandle, state: &immich::DesktopState) -> Result<(), String> {
     if cache::has_active_transfers() {
         return Err("Wait for the active file transfer to finish before resetting".into());
@@ -229,6 +247,9 @@ async fn reset(app: &AppHandle, state: &immich::DesktopState) -> Result<(), Stri
         .map_err(|_| "Profile unavailable")?
         .take();
     if let Some(remote) = app.get_webview_window("immich") {
+        // Destroy bypasses CloseRequested. Capture fullscreen and geometry
+        // while the window still exists; the plugin also retries saving on exit.
+        save_window_layout(app).await;
         remote
             .destroy()
             .map_err(|_| "Cannot close Immich before reset")?;
