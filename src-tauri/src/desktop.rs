@@ -321,7 +321,7 @@ async fn clear_login(window: &WebviewWindow) -> Result<(), String> {
                             move |status| {
                                 if let Some(tx) = completion.lock().unwrap().take() {
                                     let _ =
-                                        tx.send(status.ok().map_err(|_| {
+                                        tx.send(status.map_err(|_| {
                                             "WebView2 could not clear login data".into()
                                         }));
                                 }
