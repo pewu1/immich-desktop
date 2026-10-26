@@ -3,6 +3,8 @@
 mod batch;
 mod cache;
 mod desktop;
+#[cfg(target_os = "macos")]
+mod downloads;
 mod immich;
 mod native_drag;
 mod policy;
@@ -112,6 +114,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("Unable to run Immich Desktop")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Exit = event {
+                let _ = downloads::close_all(app);
+            }
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 if cache::defer_exit(app.clone()) {
                     api.prevent_exit();

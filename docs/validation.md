@@ -63,6 +63,14 @@ Chrome on macOS requests promised-content bytes synchronously on drag entry, so 
 
 Automated tests use modeled Immich DOM/module state and private native pasteboards. They do not establish live upstream module compatibility or a physical Finder/Chrome handoff. Group file URLs use a different path from the deferred single-item browser compatibility representation; previous single-item Firefox failures remain unchanged.
 
+## macOS archive downloads
+
+Run `cargo run --manifest-path src-tauri/Cargo.toml --example archive_download_probe --offline` on macOS. This starts an isolated, nonpersistent Tauri/WebKit session and a loopback fixture server. It creates then removes two uniquely named ZIP files in the real system Downloads folder; it does not use or clear the app's saved login.
+
+The probe verifies the production new-window handler preserves an authenticated archive POST, its query string, asset IDs, Unicode archive name and edited flag. It compares the downloaded ZIP bytes exactly, repeats the download to check filename collision handling, checks hidden-window cleanup after success and an HTML error response, and rejects an unrelated popup. This probe passed on Intel macOS 15.7.3. It does not establish live Immich album/selection compatibility or Apple Silicon behavior.
+
+Manual acceptance: from the rebuilt app, download a selection and an album, open their ZIP files and compare filenames and contents. Repeat with duplicate archive names and an expired login. Confirm ordinary single-photo/video downloads still work, the Immich page remains open, and reset/quit closes hidden download windows. Completed files in Downloads must survive configuration reset. These live-server checks remain pending.
+
 ## Security and outstanding checks
 
 - Different origins, ports, subdomains and frames must not inherit commands. Setup, shell, generic HTTP/filesystem commands remain denied remotely.

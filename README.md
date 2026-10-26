@@ -177,6 +177,8 @@ Use the same account for the API key and web login. The key may not access all s
 
 Downloads started from Immich save to the system's default Downloads folder (`~/Downloads` on macOS and the user's Downloads folder on Windows). Drag preparation stores originals separately in the app cache; those files are removed by configuration reset.
 
+On macOS, selection and album ZIP downloads use a hidden webview sharing Immich's login session. It receives the original archive form POST and closes when the download finishes or fails. Other popup requests remain blocked. Single-file downloads continue through the main webview.
+
 Use **Immich Desktop → Reset configuration and login…** in the macOS menu bar or Windows window menu to change servers or erase local login data. Confirm **Reset and restart** to remove the saved server URL, API key, all app-webview cookies/storage and the cached original. This does not delete server photos or sign you out of other browsers. Reset waits for browser-data deletion to finish before restarting into setup, and refuses to interrupt an active file transfer. If interrupted, the next launch offers reset again instead of reopening the previous session. If a saved API key becomes unavailable, setup opens so you can enter it again.
 
 **Immich Desktop → About Immich Desktop** shows the app icon, version, GPL-3.0-only license and GitHub link. External links open in your system browser. The supplied flower-monitor artwork was prepared with transparent outer edges and exported as PNG, macOS ICNS and Windows ICO; the editable master is `src-tauri/icons/app-icon-source.png`.

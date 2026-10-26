@@ -254,6 +254,8 @@ async fn reset(app: &AppHandle, state: &immich::DesktopState) -> Result<(), Stri
             .destroy()
             .map_err(|_| "Cannot close Immich before reset")?;
     }
+    #[cfg(target_os = "macos")]
+    crate::downloads::close_all(app).map_err(|_| "Cannot close archive downloads before reset")?;
     let store = app
         .get_webview_window("main")
         .ok_or("Setup webview unavailable")?;

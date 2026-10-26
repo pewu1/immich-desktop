@@ -191,7 +191,7 @@ pub async fn open_configured(app: AppHandle, state: &DesktopState) -> Result<(),
     let navigation_app = app.clone();
     // Build from this async command/startup worker. Creating a WebView2 window
     // synchronously inside a main-thread event handler can deadlock on Windows.
-    let window =
+    let builder =
         WebviewWindowBuilder::new(&app, "immich", WebviewUrl::External(profile.server.clone()))
             .title("Immich Desktop")
             .inner_size(1200.0, 850.0)
@@ -208,9 +208,10 @@ pub async fn open_configured(app: AppHandle, state: &DesktopState) -> Result<(),
                     state.batches.cancel_current();
                 }
                 url.origin() == allowed_origin || url.scheme() == "https"
-            })
-            .build()
-            .map_err(|_| "Cannot open Immich webview")?;
+            });
+    #[cfg(target_os = "macos")]
+    let builder = crate::downloads::attach(builder, app.clone(), profile.server.clone());
+    let window = builder.build().map_err(|_| "Cannot open Immich webview")?;
     // The window-state plugin's ready handler is queued before this show, so
     // the initial default geometry never flashes before the saved state.
     window.show().map_err(|_| "Cannot show Immich webview")?;
