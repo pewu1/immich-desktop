@@ -22,7 +22,11 @@ function identify(target) {
   const content = target.closest('#immich-asset-viewer [data-viewer-content]');
   const viewerId = location.pathname?.match(/\/photos\/([^/]+)\/?$/)?.[1];
   if (!content || !UUID.test(viewerId || '')) return;
-  if (content.querySelector('.crop-area') || target.closest('.pointer-events-auto, a[href]')) return;
+  if (content.querySelector('.crop-area') || target.closest('a[href]')) return;
+  // Immich uses pointer-events-auto for both image layers and interactive
+  // overlays. Let the media itself drag while preserving overlay interactions.
+  const pointerSurface = target.closest('.pointer-events-auto');
+  if (pointerSurface && !pointerSurface.matches('img, video, hls-video')) return;
   // Zoom-image transforms the media wrapper. Ignore AdaptiveImage's internal
   // raster counter-scale (< 1); a zoom transform > 1 belongs to mouse panning.
   for (const start of [target, media(content)]) {

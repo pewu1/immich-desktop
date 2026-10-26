@@ -11,11 +11,19 @@ function harness(origin = 'https://photos.example', framed = false, handler) {
   const page = { origin, href: `${origin}/photos`, pathname: '/photos' };
   class Element {
     constructor(assetId = id, button = false) { this.assetId = assetId; this.button = button; this.loaded = true; this.selected = false; }
+    matches(selector) {
+      return selector.split(',').some(part => {
+        const value = part.trim();
+        if (value === '.pointer-events-auto') return this.overlay || this.pointerEventsAuto;
+        if (value === 'a[href]') return this.link;
+        return value === (this.tagName || 'div');
+      });
+    }
     closest(selector) {
-      if (selector === '[data-asset]') return this.viewer ? null : this;
-      if (selector === '#immich-asset-viewer [data-viewer-content]') return this.viewer ? this : null;
-      if (this.overlay && selector.includes('.pointer-events-auto')) return this;
-      return this.button && selector.includes('button') ? this : null;
+      if (selector === '[data-asset]') return !this.viewer && this.assetId ? this : this.parentElement?.closest(selector) || null;
+      if (selector === '#immich-asset-viewer [data-viewer-content]') return this.viewer ? this : this.parentElement?.closest(selector) || null;
+      if (this.matches(selector) || (this.button && selector.includes('button'))) return this;
+      return this.parentElement?.closest(selector) || null;
     }
     getAttribute(name) { return name === 'data-asset' ? this.assetId : null; }
     hasAttribute(name) { return name === 'data-selected' && this.selected; }
@@ -152,6 +160,19 @@ test('failed drags and cancellation also consume the gesture click without selec
 });
 
 const otherId = '22222222-2222-4222-8222-222222222222';
+function viewerMedia(h, tagName = 'img') {
+  const content = new h.Element(), wrapper = new h.Element(null), image = new h.Element(null);
+  content.viewer = true; h.page.pathname = `/photos/${id}`;
+  wrapper.parentElement = content; image.parentElement = wrapper;
+  image.tagName = tagName; image.pointerEventsAuto = true;
+  image.complete = true; image.naturalWidth = 800; image.naturalHeight = 1200;
+  image.getClientRects = () => [1]; content.image = image;
+  if (tagName !== 'img') {
+    content.noImage = true; content.video = image;
+    image.readyState = 2; image.videoWidth = 800; image.videoHeight = 1200;
+  }
+  return { content, wrapper, image };
+}
 test('checked thumbnail drags the complete mixed selection including unrendered assets', async () => {
   const h = harness(), photo = new h.Element(); photo.selected = true;
   const manager = h.selection([id, otherId]); h.rendered.push(photo);
@@ -209,6 +230,42 @@ test('opened photo and video drag the current asset even with checked timeline i
     h.listeners.get('pointerdown')(h.event(content));
     await h.listeners.get('pointermove')(h.event(content, { clientX: 12 }));
     assert.equal(h.calls.find(call => call.command === 'drag_asset').args.assetId, id);
+  }
+});
+test('viewer media with pointer-events-auto and its background each start exactly one drag', async () => {
+  for (const tagName of ['img', 'video', 'hls-video']) {
+    for (const background of [false, true]) {
+      const h = harness(), { content, image } = viewerMedia(h, tagName);
+      const target = background ? content : image;
+      const press = h.event(target); h.listeners.get('pointerdown')(press);
+      assert.equal(press.stopped, true, `${tagName}: eligible viewer press`);
+      await h.listeners.get('pointermove')(h.event(target, { clientX: 12 }));
+      await h.listeners.get('pointermove')(h.event(target, { clientX: 24 }));
+      const drags = h.calls.filter(call => call.command === 'drag_asset');
+      assert.equal(drags.length, 1); assert.equal(drags[0].args.assetId, id);
+      assert.equal(h.drawings[0][0], image);
+      assert.equal(h.drawings[0][3], 128); assert.equal(h.drawings[0][4], 192);
+    }
+  }
+});
+test('nested face and OCR overlays, links and controls remain upstream interactions', () => {
+  for (const mode of ['face', 'ocr', 'link', 'control']) {
+    const h = harness(), { wrapper } = viewerMedia(h);
+    const overlay = new h.Element(null), target = new h.Element(null);
+    overlay.parentElement = wrapper; target.parentElement = overlay;
+    overlay.overlay = mode === 'face' || mode === 'ocr';
+    overlay.link = mode === 'link'; overlay.button = mode === 'control';
+    const press = h.event(target); h.listeners.get('pointerdown')(press);
+    assert.equal(press.stopped, undefined); assert.equal(h.calls.length, 0);
+  }
+});
+test('pointer-events-auto media and background retain panning through a zoomed wrapper', () => {
+  for (const background of [false, true]) {
+    const h = harness(), { content, wrapper, image } = viewerMedia(h);
+    wrapper.zoom = '2';
+    const press = h.event(background ? content : image);
+    h.listeners.get('pointerdown')(press);
+    assert.equal(press.stopped, undefined); assert.equal(h.calls.length, 0);
   }
 });
 test('a video poster supplies the preview before its first frame is ready', async () => {
