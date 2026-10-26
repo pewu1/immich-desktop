@@ -4,6 +4,14 @@ A small Rust / Tauri 2 wrapper for the existing Immich web UI, with native outbo
 
 **Status: experimental.** User testing confirms that the current build copies photos to Finder and delivers files to Chrome on Intel macOS. An earlier Chrome result also recorded a real Immich JPEG through `DataTransfer.files`, with its filename, JPEG MIME type and file size; no source-hash comparison was supplied. Slow uncached transfers can stall or time out in Chrome. **Firefox drops do not work in the current macOS build.** Windows and Apple Silicon have not been validated. See [validation status](docs/validation.md).
 
+## Automated builds and downloads
+
+Every push to `main` runs [the release workflow](.github/workflows/release.yml) on native Intel macOS, Apple Silicon macOS and Windows x64 runners. After all three builds and their JavaScript/Rust tests pass, it publishes a separate `main-<run number>` prerelease under [GitHub Releases](https://github.com/pewu1/ImmichDesktop/releases), tied to the exact commit that triggered the run.
+
+Each release contains architecture-labeled macOS DMGs, Windows x64 MSI and EXE installers, and `SHA256SUMS`. Installer filenames use the `immich-desktop` prefix, for example `immich-desktop_0.1.0_macos-intel.dmg`, `immich-desktop_0.1.0_macos-apple-silicon.dmg` and `immich-desktop_0.1.0_windows-x64.exe`. Download the installer for your machine and install it manually. macOS CI builds use ad-hoc signatures without Apple notarization; Windows installers are unsigned. Successful compilation does not establish native drag/browser interoperability on every platform.
+
+The workflow uses GitHub's automatic `GITHUB_TOKEN`; no custom token or signing secrets are needed. Only its publishing job requests `contents: write`. A failed build prevents publication, while successful platform installers remain available as workflow artifacts for seven days. Rerunning the same workflow updates its existing release instead of mixing commits or creating another tag.
+
 ## Compile and run on macOS
 
 The app targets macOS 11 or later, on Intel and Apple Silicon. Build it on a Mac with a supported Xcode command-line toolchain.

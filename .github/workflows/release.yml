@@ -1,0 +1,151 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+          - platform: macos-apple-silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - platform: windows-x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: Test JavaScript
+        run: npm test
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --target ${{ matrix.target }}
+
+      - name: Build installers
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          # Ad-hoc signing needs no Apple secrets and supports downloaded arm64 apps.
+          APPLE_SIGNING_IDENTITY: '-'
+        run: |
+          node -e "require('node:fs').rmSync(require('node:path').join('src-tauri', 'target', process.env.BUILD_TARGET, 'release', 'bundle'), { recursive: true, force: true })"
+          npm run build -- --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} -- --locked
+
+      - name: Collect installers
+        shell: bash
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { copyFileSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs';
+          import { join } from 'node:path';
+
+          const { BUILD_TARGET: target, RELEASE_PLATFORM: platform } = process.env;
+          const { version } = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const bundleRoot = join('src-tauri', 'target', target, 'release', 'bundle');
+          const bundles = platform.startsWith('macos-') ? [['dmg', '.dmg']] : [['msi', '.msi'], ['nsis', '.exe']];
+          mkdirSync('dist', { recursive: true });
+          for (const [bundle, extension] of bundles) {
+            const directory = join(bundleRoot, bundle);
+            const files = readdirSync(directory).filter(name => name.endsWith(extension));
+            if (files.length !== 1 || !statSync(join(directory, files[0])).isFile() || statSync(join(directory, files[0])).size === 0) {
+              throw new Error(`Expected one nonempty ${extension} installer in ${directory}`);
+            }
+            copyFileSync(join(directory, files[0]), join('dist', `immich-desktop_${version}_${platform}${extension}`));
+          }
+          NODE
+
+      - name: Upload installers
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: immich-desktop-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+          compression-level: 0
+          retention-days: 7
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers from all platforms
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: immich-desktop-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate installer checksums
+        working-directory: dist
+        run: sha256sum -- *.dmg *.msi *.exe > SHA256SUMS
+
+      - name: Publish this commit's installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          tag="main-${GITHUB_RUN_NUMBER}"
+          title="Immich Desktop — main build ${GITHUB_RUN_NUMBER}"
+          printf '%s\n' \
+            "Automated build of main at commit ${GITHUB_SHA}." \
+            "" \
+            "Downloads: Intel macOS DMG, Apple Silicon macOS DMG, and Windows x64 MSI/EXE installers." \
+            "Install manually. macOS builds are ad-hoc signed, without Apple notarization; Windows builds are unsigned." \
+            "SHA256SUMS contains the installer checksums." \
+            "" \
+            "Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > release-notes.md
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --target "$GITHUB_SHA" --title "$title" \
+              --notes-file release-notes.md --draft --prerelease --latest=false
+          fi
+          gh release upload "$tag" dist/* --clobber
+          gh release edit "$tag" --title "$title" --notes-file release-notes.md \
+            --draft=false --prerelease --latest=false

@@ -19,6 +19,7 @@
 | Windows native C++ adapter | Implemented; **not compiled or tested here**, no Windows SDK/host |
 | Apple Silicon build/drop | Not tested; Intel macOS host only |
 | Live Immich replacement flow | Not tested against a supplied server/account |
+| GitHub Actions build/release matrix | Configured for pushes to `main`: native Intel/Apple Silicon macOS DMGs and Windows x64 MSI/NSIS installers; first hosted run and release publication pending |
 | Viewer and group drops into Finder / Chrome | Implemented; physical cross-application tests pending, including compatibility with the deployed Immich selection-manager export |
 
 The user's real-photo Chrome result establishes that the compatibility path can deliver an ordinary JPEG `File`; it does not establish a source-hash match or arbitrary download latency. The latest physical retest confirms the revised AppKit provider works with Finder and Chrome. Firefox still fails. The five-second synthetic test and the earlier text-fallback results remain failures.
