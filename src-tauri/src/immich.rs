@@ -198,6 +198,10 @@ pub async fn open_configured(app: AppHandle, state: &DesktopState) -> Result<(),
             .visible(false)
             .disable_drag_drop_handler()
             .initialization_script(script)
+            // Registering a handler enables WKWebView downloads on macOS.
+            // Keep the native destination: the system Downloads folder, with
+            // filename collision handling supplied by the webview runtime.
+            .on_download(|_, _| true)
             // HTTPS identity-provider redirects may load, but receive no native capability.
             .on_navigation(move |url| {
                 if let Some(state) = navigation_app.try_state::<DesktopState>() {
